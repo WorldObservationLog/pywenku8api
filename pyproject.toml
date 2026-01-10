@@ -4,11 +4,13 @@ version = "0.1.0"
 description = ""
 authors = ["世界观察日志 <wolchannel@proton.me>"]
 readme = "README.md"
+packages = [
+    { include = "wenku8" }
+]
 
 [tool.poetry.dependencies]
 python = "^3.11"
 curl-cffi = "^0.14.0"
-beautifulsoup4 = "^4.14.3"
 lxml = "^6.0.2"
 
 [tool.poetry.group.dev.dependencies]
