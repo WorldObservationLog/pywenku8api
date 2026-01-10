@@ -54,23 +54,39 @@ class Wenku8API:
         resp.encoding = lang
         resp.raise_for_status()
         parser = etree.HTML(resp.text)
+
+        if bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b/br'))):
+            last_updated = None
+            word_count = None
+            popularity_level = None
+            trending_level = None
+            latest_section = None
+            intro = "".join(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[4]//text()'))
+        else:
+            last_updated = extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[4]', True)
+            word_count = int(
+                extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[5]', True).replace("字", ""))
+            popularity_level = separate_chinese_colon(
+                extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b').split("，")[0])[1]
+            trending_level = separate_chinese_colon(
+                extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b').split("，")[1])[1]
+            latest_section = extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[4]/a')
+            intro = "".join(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[6]//text()'))
+
         return NovelInfo(
             aid=aid,
             title=extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[1]/td/table/tr/td[1]/span/b'),
             author=extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[2]', True),
             status=extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[3]', True),
-            last_updated=extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[4]', True),
-            intro="".join(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[6]//text()')),
+            last_updated=last_updated,
+            intro=intro,
             tags=extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[1]/b', True).split(" "),
             press=extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[1]', True),
-            word_count=int(
-                extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[5]', True).replace("字", "")),
-            popularity_level=separate_chinese_colon(
-                extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b').split("，")[0])[1],
-            trending_level=separate_chinese_colon(
-                extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b').split("，")[1])[1],
-            latest_section=extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[4]/a'),
-            copyright=not bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tbody/tr/td[2]/span[2]/b/br'))),
+            word_count=word_count,
+            popularity_level=popularity_level,
+            trending_level=trending_level,
+            latest_section=latest_section,
+            copyright=not bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b/br'))),
             animation=bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[1]/span/b')))
         )
 
@@ -185,7 +201,8 @@ class Wenku8API:
 
     @login_required
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
-        resp = await self._session.get(self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
+        resp = await self._session.get(
+            self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
         resp.encoding = lang
         resp.raise_for_status()
         parser = etree.HTML(resp.text)

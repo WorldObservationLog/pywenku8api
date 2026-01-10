@@ -26,14 +26,14 @@ class NovelInfo:
     title: str
     author: str
     status: str
-    last_updated: str
+    last_updated: Optional[str]
     intro: str
     tags: list[str]
     press: str
-    word_count: int
-    popularity_level: str
-    trending_level: str
-    latest_section: str
+    word_count: Optional[int]
+    popularity_level: Optional[str]
+    trending_level: Optional[str]
+    latest_section: Optional[str]
     copyright: bool
     animation: bool
 
