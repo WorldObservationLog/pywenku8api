@@ -1,0 +1,2 @@
+class NotLoggedInException(Exception):
+    pass
