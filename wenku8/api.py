@@ -4,7 +4,6 @@ from urllib.parse import quote
 
 import curl_cffi
 import lxml.html
-from bs4 import BeautifulSoup
 from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
