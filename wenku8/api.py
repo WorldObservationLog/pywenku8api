@@ -62,6 +62,10 @@ class Wenku8API:
         resp = await self._request("POST", self.ENDPOINT + "/login.php", data=form_data)
         return resp.cookies.get("PHPSESSID")
 
+    @property
+    def is_logged_in(self):
+        return bool(self._session.cookies.get("PHPSESSID"))
+
     async def get_novel_cover(self, aid: int):
         resp = await self._request("GET", f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
         return resp.content
