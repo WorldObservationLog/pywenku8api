@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import re
 from urllib.parse import quote
@@ -24,11 +25,31 @@ def login_required(func):
 
 class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
+    RETRY = False
+    RETRY_INTERVAL = 3
     _session: curl_cffi.AsyncSession
 
-    def __init__(self, endpoint: str = "https://www.wenku8.net"):
+    def __init__(self, endpoint: str = "https://www.wenku8.net", retry: bool = False, retry_interval: int = 3):
         self.ENDPOINT = endpoint
+        self.RETRY = retry
+        self.RETRY_INTERVAL = retry_interval
         self._session = curl_cffi.AsyncSession(impersonate="chrome")
+
+    @functools.wraps(curl_cffi.AsyncSession.request)
+    async def _request(self, *args, **kwargs):
+        if self.RETRY:
+            while True:
+                try:
+                    result = await self._session.request(*args, **kwargs)
+                    result.raise_for_status()
+                    return result
+                except curl_cffi.requests.errors.RequestsError:
+                    await asyncio.sleep(self.RETRY_INTERVAL)
+                    continue
+        else:
+            result = await self._session.request(*args, **kwargs)
+            result.raise_for_status()
+            return result
 
     async def login(self, username: str, password: str, validity: LoginValidity = LoginValidity.NONE) -> str:
         form_data = {
@@ -38,20 +59,17 @@ class Wenku8API:
             "action": "login",
             "submit": "%26%23160%3B%B5%C7%26%23160%3B%26%23160%3B%C2%BC%26%23160%3B"
         }
-        resp = await self._session.post(self.ENDPOINT + "/login.php", data=form_data)
-        resp.raise_for_status()
+        resp = await self._request("POST", self.ENDPOINT + "/login.php", data=form_data)
         return resp.cookies.get("PHPSESSID")
 
     async def get_novel_cover(self, aid: int):
-        resp = await self._session.get(f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
-        resp.raise_for_status()
+        resp = await self._request("GET", f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
         return resp.content
 
     @login_required
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
-        resp = await self._session.get(self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
         resp.encoding = lang
-        resp.raise_for_status()
         parser = etree.HTML(resp.text)
 
         if bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b/br'))):
@@ -91,9 +109,8 @@ class Wenku8API:
 
     @login_required
     async def get_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
-        resp = await self._session.get(self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset={lang}")
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset={lang}")
         resp.encoding = lang
-        resp.raise_for_status()
         parser = etree.HTML(resp.text)
         volumes = []
         current_vol = None
@@ -126,10 +143,8 @@ class Wenku8API:
 
     @login_required
     async def get_novel_content(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
-        resp = await self._session.get(
-            self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset={lang}")
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset={lang}")
         resp.encoding = lang
-        resp.raise_for_status()
         parser = etree.HTML(resp.text)
         results = []
         for child in parser.xpath('//*[@id="content"]')[0]:
@@ -179,13 +194,10 @@ class Wenku8API:
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
         if method == SearchMethod.NAME:
-            resp = await self._session.get(
-                self.ENDPOINT + f"/modules/article/search.php?searchtype=articlename&searchkey={quote(keyword.encode(lang))}&page={page}&charset={lang}")
+            resp = await self._request("GET", self.ENDPOINT + f"/modules/article/search.php?searchtype=articlename&searchkey={quote(keyword.encode(lang))}&page={page}&charset={lang}")
         else:
-            resp = await self._session.get(
-                self.ENDPOINT + f"/modules/article/authorarticle.php?&author={quote(keyword.encode(lang))}&page={page}&charset={lang}")
+            resp = await self._request("GET", self.ENDPOINT + f"/modules/article/authorarticle.php?&author={quote(keyword.encode(lang))}&page={page}&charset={lang}")
         resp.encoding = lang
-        resp.raise_for_status()
         parser = etree.HTML(resp.text)
         return self._search_page_parser(parser)
 
@@ -196,22 +208,19 @@ class Wenku8API:
         return await self.search_novel(keyword, SearchMethod.AUTHOR, page, lang)
 
     async def get_picture(self, url: str):
-        return (await self._session.get(url)).content
+        return (await self._request("GET", url)).content
 
     @login_required
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
-        resp = await self._session.get(
-            self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
         resp.encoding = lang
-        resp.raise_for_status()
         parser = etree.HTML(resp.text)
         return self._search_page_parser(parser)
 
     @login_required
     async def get_bookshelf(self, bid: int = 0, lang: Lang = Lang.zh_CN) -> list[BookshelfItem]:
-        resp = await self._session.get(self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}&charset={lang}")
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}&charset={lang}")
         resp.encoding = lang
-        resp.raise_for_status()
         parser = etree.HTML(resp.text)
         results = []
         for novel in parser.xpath('//*[@id="checkform"]/table')[0]:
