@@ -202,8 +202,16 @@ class Wenku8API:
         else:
             resp = await self._request("GET", self.ENDPOINT + f"/modules/article/authorarticle.php?&author={quote(keyword.encode(lang))}&page={page}&charset={lang}")
         resp.encoding = lang
-        parser = etree.HTML(resp.text)
-        return self._search_page_parser(parser)
+        if resp.url.endswith(".htm"): # 只有一个结果时会跳转到对应的页面
+            info = await self.get_novel_info(re.search(r"(\d*).htm", resp.url).group(1), lang=lang)
+            return SearchResult(results=[SearchItem(aid=info.aid, title=info.title, author=info.author, press=info.press,
+                                                    last_updated=info.last_updated, word_count=info.word_count,
+                                                    status=info.status, tags=info.tags, intro_preview=info.intro,
+                                                    copyright=info.copyright, animation=info.animation)],
+                                page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1))
+        else:
+            parser = etree.HTML(resp.text)
+            return self._search_page_parser(parser)
 
     async def search_novel_by_name(self, keyword: str, page: int = 1, lang: Lang = Lang.zh_CN):
         return await self.search_novel(keyword, SearchMethod.NAME, page, lang)
