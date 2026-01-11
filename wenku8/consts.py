@@ -15,7 +15,7 @@ class Lang(StrEnum):
 
 class SearchMethod(StrEnum):
     NAME = "articlename"
-    AUTHOR = "articleauthor"
+    AUTHOR = "author"
 
 
 class NovelSortMethod(StrEnum):
