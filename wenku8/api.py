@@ -1,10 +1,10 @@
-import asyncio
 import functools
 import re
 from urllib.parse import quote
 
-import curl_cffi
+import httpx
 import lxml.html
+from httpx_curl_cffi import AsyncCurlTransport, CurlOpt
 from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
@@ -25,19 +25,23 @@ def login_required(func):
 
 class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
-    _session: curl_cffi.AsyncSession
+    _session: httpx.AsyncClient
 
     def __init__(self, endpoint: str = "https://www.wenku8.net"):
         self.ENDPOINT = endpoint
-        self._session = curl_cffi.AsyncSession(impersonate="chrome")
+        self._session = httpx.AsyncClient(transport=AsyncCurlTransport(
+          impersonate="chrome",
+          default_headers=True,
+          curl_options={CurlOpt.FRESH_CONNECT: True}
+        ))
 
-    @functools.wraps(curl_cffi.AsyncSession.request)
+    @functools.wraps(httpx.AsyncClient.request)
     async def _request(self, *args, **kwargs):
         try:
             result = await self._session.request(*args, **kwargs)
             result.raise_for_status()
             return result
-        except curl_cffi.requests.errors.RequestsError as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 raise RateLimitException
             else:
