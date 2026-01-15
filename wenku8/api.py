@@ -8,7 +8,7 @@ import lxml.html
 from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
-from wenku8.exceptions import NotLoggedInException
+from wenku8.exceptions import NotLoggedInException, RateLimitException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon
 
@@ -25,31 +25,23 @@ def login_required(func):
 
 class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
-    RETRY = False
-    RETRY_INTERVAL = 3
     _session: curl_cffi.AsyncSession
 
-    def __init__(self, endpoint: str = "https://www.wenku8.net", retry: bool = False, retry_interval: int = 3):
+    def __init__(self, endpoint: str = "https://www.wenku8.net"):
         self.ENDPOINT = endpoint
-        self.RETRY = retry
-        self.RETRY_INTERVAL = retry_interval
         self._session = curl_cffi.AsyncSession(impersonate="chrome")
 
     @functools.wraps(curl_cffi.AsyncSession.request)
     async def _request(self, *args, **kwargs):
-        if self.RETRY:
-            while True:
-                try:
-                    result = await self._session.request(*args, **kwargs)
-                    result.raise_for_status()
-                    return result
-                except curl_cffi.requests.errors.RequestsError:
-                    await asyncio.sleep(self.RETRY_INTERVAL)
-                    continue
-        else:
+        try:
             result = await self._session.request(*args, **kwargs)
             result.raise_for_status()
             return result
+        except curl_cffi.requests.errors.RequestsError as e:
+            if e.response.status_code == 429:
+                raise RateLimitException
+            else:
+                raise e
 
     async def login(self, username: str, password: str, validity: LoginValidity = LoginValidity.NONE) -> str:
         form_data = {
