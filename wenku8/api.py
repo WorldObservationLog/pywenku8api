@@ -16,7 +16,7 @@ from wenku8.utils import extract_text, cooldown, separate_chinese_colon
 def login_required(func):
     @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
-        if self._session.cookies.get("PHPSESSID") is None:
+        if self.session.cookies.get("PHPSESSID") is None:
             raise NotLoggedInException
         return await func(self, *args, **kwargs)
 
@@ -25,11 +25,11 @@ def login_required(func):
 
 class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
-    _session: httpx.AsyncClient
+    session: httpx.AsyncClient
 
     def __init__(self, endpoint: str = "https://www.wenku8.net"):
         self.ENDPOINT = endpoint
-        self._session = httpx.AsyncClient(transport=AsyncCurlTransport(
+        self.session = httpx.AsyncClient(transport=AsyncCurlTransport(
           impersonate="chrome",
           default_headers=True,
           curl_options={CurlOpt.FRESH_CONNECT: True}
@@ -38,7 +38,7 @@ class Wenku8API:
     @functools.wraps(httpx.AsyncClient.request)
     async def _request(self, *args, **kwargs):
         try:
-            result = await self._session.request(*args, **kwargs)
+            result = await self.session.request(*args, **kwargs)
             result.raise_for_status()
             return result
         except httpx.HTTPStatusError as e:
@@ -60,7 +60,7 @@ class Wenku8API:
 
     @property
     def is_logged_in(self):
-        return bool(self._session.cookies.get("PHPSESSID"))
+        return bool(self.session.cookies.get("PHPSESSID"))
 
     async def get_novel_cover(self, aid: int):
         resp = await self._request("GET", f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
