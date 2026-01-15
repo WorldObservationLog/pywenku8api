@@ -173,10 +173,17 @@ class Wenku8API:
                 status = novel[1][2].text.split("/")[2]
                 animation = len(novel[1][2].text.split("/")) == 4
 
+            # Wenku8 繁体网页版似乎存在编码问题，部分字符无法正常以 Big5 显示
+            # see also: https://www.wenku8.net/modules/article/articleinfo.php?id=4093&charset=big5
+            if "/" in novel[1][1].text:
+                press = novel[1][1].text.split("/")[1].split(":")[1]
+            else:
+                press = novel[1][1].text.split("  ")[1].split(":")[1]
+
             results.append(SearchItem(aid=re.search(r'(\d+).htm', novel[1][0][0].get("href")).group(1),
                                       title=novel[1][0][0].text,
                                       author=novel[1][1].text.split("/")[0].split(":")[1],
-                                      press=novel[1][1].text.split("/")[1].split(":")[1],
+                                      press=press,
                                       last_updated=last_updated,
                                       word_count=word_count,
                                       status=status,
