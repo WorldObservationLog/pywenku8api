@@ -12,6 +12,8 @@ packages = [
 python = "^3.11"
 curl-cffi = "^0.14.0"
 lxml = "^6.0.2"
+httpx = "^0.28.1"
+httpx-curl-cffi = "^0.1.5"
 
 [tool.poetry.group.dev.dependencies]
 python-dotenv = "^1.2.1"
