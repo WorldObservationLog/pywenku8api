@@ -33,7 +33,7 @@ class Wenku8API:
           impersonate="chrome",
           default_headers=True,
           curl_options={CurlOpt.FRESH_CONNECT: True}
-        ))
+        ), follow_redirects=True)
 
     @functools.wraps(httpx.AsyncClient.request)
     async def _request(self, *args, **kwargs):
