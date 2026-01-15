@@ -202,8 +202,8 @@ class Wenku8API:
                            lang: Lang = Lang.zh_CN) -> SearchResult:
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode(lang))}&page={page}&charset={lang}")
         resp.encoding = lang
-        if resp.url.endswith(".htm"): # 只有一个结果时会跳转到对应的页面
-            info = await self.get_novel_info(re.search(r"(\d*).htm", resp.url).group(1), lang=lang)
+        if str(resp.url).endswith(".htm"):  # 只有一个结果时会跳转到对应的页面
+            info = await self.get_novel_info(re.search(r"(\d*).htm", str(resp.url)).group(1), lang=lang)
             return SearchResult(results=[SearchItem(aid=info.aid, title=info.title, author=info.author, press=info.press,
                                                     last_updated=info.last_updated, word_count=info.word_count,
                                                     status=info.status, tags=info.tags, intro_preview=info.intro,
