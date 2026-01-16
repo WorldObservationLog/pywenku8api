@@ -42,7 +42,7 @@ class Wenku8API:
             result.raise_for_status()
             return result
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
+            if e.response.status_code == 429 or e.response.status_code == 403:
                 raise RateLimitException
             else:
                 raise e
