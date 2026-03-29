@@ -27,15 +27,17 @@ def login_required(func):
 class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
     session: httpx.AsyncClient
+    cf_bypassed: bool = False
 
-    def __init__(self, endpoint: str = "https://www.wenku8.net", enable_cache: bool = False, cache_db_path: str = ".wenku8_cache.db"):
+    def __init__(self, endpoint: str = "https://www.wenku8.net", enable_cache: bool = False,
+                 cache_db_path: str = ".wenku8_cache.db"):
         self.ENDPOINT = endpoint
         self.enable_cache = enable_cache
         self.cache_db_path = cache_db_path
         self.session = httpx.AsyncClient(transport=AsyncCurlTransport(
-          impersonate="chrome",
-          default_headers=True,
-          curl_options={CurlOpt.FRESH_CONNECT: True}
+            impersonate="chrome",
+            default_headers=True,
+            curl_options={CurlOpt.FRESH_CONNECT: True}
         ), follow_redirects=True)
 
     @functools.wraps(httpx.AsyncClient.request)
@@ -64,6 +66,22 @@ class Wenku8API:
     @property
     def is_logged_in(self):
         return bool(self.session.cookies.get("PHPSESSID"))
+
+    async def bypass_cloudflare(self, url: str, timeout: float = 30.0, headless: bool = False, proxy: str = None):
+        """
+        通过运行本地无头浏览器获取 Cloudflare 的 cf_clearance Cookie 和真实的 User-Agent，
+        并将其更新回当前的 HTTPX 会话中。以解决 403 / 503 等质询问题。
+        """
+        from .cf_solver import get_cloudflare_clearance
+        user_agent, cookies = await get_cloudflare_clearance(
+            url=url,
+            timeout=timeout,
+            headless=headless,
+            proxy=proxy
+        )
+        self.session.headers.update({"User-Agent": user_agent})
+        self.session.cookies.update(cookies)
+        self.cf_bypassed = True
 
     @with_cache(expires_days=None)
     async def get_novel_cover(self, aid: int):
@@ -150,7 +168,8 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_content(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset={lang}")
+        resp = await self._request("GET",
+                                   self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset={lang}")
         resp.encoding = lang
         parser = etree.HTML(resp.text)
         results = []
@@ -208,15 +227,17 @@ class Wenku8API:
     @with_cache(expires_days=3)
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode(lang))}&page={page}&charset={lang}")
+        resp = await self._request("GET",
+                                   self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode(lang))}&page={page}&charset={lang}")
         resp.encoding = lang
         if str(resp.url).endswith(".htm"):  # 只有一个结果时会跳转到对应的页面
             info = await self.get_novel_info(re.search(r"(\d*).htm", str(resp.url)).group(1), lang=lang)
-            return SearchResult(results=[SearchItem(aid=info.aid, title=info.title, author=info.author, press=info.press,
-                                                    last_updated=info.last_updated, word_count=info.word_count,
-                                                    status=info.status, tags=info.tags, intro_preview=info.intro,
-                                                    copyright=info.copyright, animation=info.animation)],
-                                page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1))
+            return SearchResult(
+                results=[SearchItem(aid=info.aid, title=info.title, author=info.author, press=info.press,
+                                    last_updated=info.last_updated, word_count=info.word_count,
+                                    status=info.status, tags=info.tags, intro_preview=info.intro,
+                                    copyright=info.copyright, animation=info.animation)],
+                page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1))
         else:
             parser = etree.HTML(resp.text)
             return self._search_page_parser(parser)
@@ -234,7 +255,11 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=3)
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
+        if not self.cf_bypassed:
+            await self.bypass_cloudflare(
+                self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
+        resp = await self._request("GET",
+                                   self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
         resp.encoding = lang
         parser = etree.HTML(resp.text)
         return self._search_page_parser(parser)
