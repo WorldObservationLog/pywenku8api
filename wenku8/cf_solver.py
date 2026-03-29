@@ -131,7 +131,7 @@ class CloudflareSolver:
         headless: bool,
         proxy: Optional[str],
     ) -> None:
-        config = zendriver.Config(headless=headless)
+        config = zendriver.Config(headless=headless, sandbox=False)
 
         if user_agent is not None:
             config.add_argument(f"--user-agent={user_agent}")
