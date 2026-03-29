@@ -91,6 +91,9 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=3)
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
+        if not self.cf_bypassed:
+            await self.bypass_cloudflare(
+                self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
         resp.encoding = lang
         parser = etree.HTML(resp.text)
