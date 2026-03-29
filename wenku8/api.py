@@ -10,7 +10,7 @@ from lxml import etree
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
 from wenku8.exceptions import NotLoggedInException, RateLimitException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
-from wenku8.utils import extract_text, cooldown, separate_chinese_colon
+from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content
 from wenku8.cache import with_cache
 
 
@@ -183,6 +183,18 @@ class Wenku8API:
                 results.append(child.tail)
 
         return "".join(results)
+
+    @with_cache(expires_days=3)
+    async def get_full_novel_content(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
+        resp = await self._request("GET", f"https://dl.wenku8.com/down.php?type=utf8&node=1&id={aid}")
+        return resp.text
+
+    @login_required
+    @with_cache(expires_days=None)
+    async def get_novel_content_via_full(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
+        full_content = await self.get_full_novel_content(aid, lang)
+        novel_index = await self.get_novel_index(aid, lang)
+        return get_chapter_content(full_content, novel_index, cid)
 
     def _search_page_parser(self, parser: lxml.html.Element):
         results = []
