@@ -11,6 +11,7 @@ from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
 from wenku8.exceptions import NotLoggedInException, RateLimitException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon
+from wenku8.cache import with_cache
 
 
 def login_required(func):
@@ -27,8 +28,10 @@ class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
     session: httpx.AsyncClient
 
-    def __init__(self, endpoint: str = "https://www.wenku8.net"):
+    def __init__(self, endpoint: str = "https://www.wenku8.net", enable_cache: bool = False, cache_db_path: str = ".wenku8_cache.db"):
         self.ENDPOINT = endpoint
+        self.enable_cache = enable_cache
+        self.cache_db_path = cache_db_path
         self.session = httpx.AsyncClient(transport=AsyncCurlTransport(
           impersonate="chrome",
           default_headers=True,
@@ -62,11 +65,13 @@ class Wenku8API:
     def is_logged_in(self):
         return bool(self.session.cookies.get("PHPSESSID"))
 
+    @with_cache(expires_days=None)
     async def get_novel_cover(self, aid: int):
         resp = await self._request("GET", f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
         return resp.content
 
     @login_required
+    @with_cache(expires_days=3)
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
         resp.encoding = lang
@@ -108,6 +113,7 @@ class Wenku8API:
         )
 
     @login_required
+    @with_cache(expires_days=3)
     async def get_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset={lang}")
         resp.encoding = lang
@@ -142,6 +148,7 @@ class Wenku8API:
                           volumes=volumes)
 
     @login_required
+    @with_cache(expires_days=None)
     async def get_novel_content(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset={lang}")
         resp.encoding = lang
@@ -198,6 +205,7 @@ class Wenku8API:
 
     @login_required
     @cooldown(5)
+    @with_cache(expires_days=3)
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode(lang))}&page={page}&charset={lang}")
@@ -219,10 +227,12 @@ class Wenku8API:
     async def search_novel_by_author(self, keyword: str, page: int = 1, lang: Lang = Lang.zh_CN):
         return await self.search_novel(keyword, SearchMethod.AUTHOR, page, lang)
 
+    @with_cache(expires_days=None)
     async def get_picture(self, url: str):
         return (await self._request("GET", url)).content
 
     @login_required
+    @with_cache(expires_days=3)
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
         resp.encoding = lang
