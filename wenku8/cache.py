@@ -102,5 +102,153 @@ def with_cache(expires_days=None):
                 pass
 
             return result
+
+        async def invalidate_cache(self_obj, *args, **kwargs):
+            if not getattr(self_obj, "enable_cache", False):
+                return
+            db_path = getattr(self_obj, "cache_db_path", ".wenku8_cache.db")
+            sig = inspect.signature(func)
+            try:
+                bound_args = sig.bind(self_obj, *args, **kwargs)
+                bound_args.apply_defaults()
+            except TypeError:
+                return
+
+            if 'self' in bound_args.arguments:
+                bound_args.arguments.pop('self')
+
+            args_list = []
+            for k, v in sorted(bound_args.arguments.items()):
+                args_list.append(f"{k}={repr(v)}")
+
+            args_str = "::".join(args_list)
+            cache_key_str = f"{func.__name__}::{args_str}"
+            key_hash = hashlib.sha256(cache_key_str.encode('utf-8')).hexdigest()
+
+            try:
+                async with aiosqlite.connect(db_path, timeout=10.0) as db:
+                    await db.execute("DELETE FROM cache WHERE key = ?", (key_hash,))
+                    await db.commit()
+            except Exception:
+                pass
+
+        wrapper.invalidate_cache = invalidate_cache
         return wrapper
     return decorator
+
+
+class CacheDaemon:
+    def __init__(self, api_instance):
+        self.api = api_instance
+        self.task = None
+        self.last_polled_dict = None
+
+    async def _load_last_polled_dict(self):
+        if not self.api.enable_cache:
+            return {}
+        try:
+            import aiosqlite
+            import pickle
+            import zlib
+            async with aiosqlite.connect(self.api.cache_db_path, timeout=10.0) as db:
+                await db.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value BLOB, expires_at REAL)")
+                async with db.execute("SELECT value FROM cache WHERE key = ?", ("__last_polled_dict__",)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        return pickle.loads(zlib.decompress(row[0]))
+        except Exception:
+            pass
+        return {}
+
+    async def _save_last_polled_dict(self, current_dict):
+        if not self.api.enable_cache:
+            return
+        try:
+            import aiosqlite
+            import pickle
+            import zlib
+            async with aiosqlite.connect(self.api.cache_db_path, timeout=10.0) as db:
+                await db.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value BLOB, expires_at REAL)")
+                value_blob = zlib.compress(pickle.dumps(current_dict), level=9)
+                await db.execute("INSERT OR REPLACE INTO cache (key, value, expires_at) VALUES (?, ?, ?)", ("__last_polled_dict__", value_blob, None))
+                await db.commit()
+        except Exception:
+            pass
+
+    async def _loop(self, interval: int):
+        import asyncio
+        import logging
+        from wenku8.consts import NovelSortMethod, Lang
+        logger = logging.getLogger(__name__)
+
+        if self.last_polled_dict is None:
+            self.last_polled_dict = await self._load_last_polled_dict()
+
+        while True:
+            try:
+                page = 1
+                current_poll_items = {}
+                updated_aids = []
+
+                while True:
+                    result = await self.api.get_novel_list(sort=NovelSortMethod.lastUpdate, page=page)
+                    if not result.results:
+                        break
+
+                    page_has_overlap_with_old = False
+                    for item in result.results:
+                        current_poll_items[item.aid] = item
+                        if item.aid in self.last_polled_dict:
+                            page_has_overlap_with_old = True
+                            old_item = self.last_polled_dict[item.aid]
+                            if item.word_count != old_item.word_count or item.last_updated != old_item.last_updated:
+                                updated_aids.append(item.aid)
+                        else:
+                            updated_aids.append(item.aid)
+
+                    if not page_has_overlap_with_old and self.last_polled_dict:
+                        if page >= result.page_control.end:
+                            break
+                        page += 1
+                        await asyncio.sleep(1)
+                    else:
+                        break
+
+                if self.last_polled_dict:
+                    for aid in set(updated_aids):
+                        for lang in (Lang.zh_CN, Lang.zh_TW):
+                            try:
+                                old_index = await self.api.get_novel_index(aid, lang)
+                                for vol in old_index.volumes:
+                                    for ch in vol.chapters:
+                                        await self.api.get_novel_content_via_full.invalidate_cache(self.api, aid=int(aid), cid=int(ch.cid), lang=lang)
+                                        await self.api.get_novel_content.invalidate_cache(self.api, aid=int(aid), cid=int(ch.cid), lang=lang)
+
+                                await self.api.get_full_novel_content.invalidate_cache(self.api, aid=int(aid), lang=lang)
+                                await self.api.get_novel_info.invalidate_cache(self.api, aid=int(aid), lang=lang)
+                                await self.api.get_novel_index.invalidate_cache(self.api, aid=int(aid), lang=lang)
+                            except Exception as e:
+                                logger.error(f"Failed to invalidate cache for aid {aid}: {e}")
+
+                self.last_polled_dict = current_poll_items
+                await self._save_last_polled_dict(self.last_polled_dict)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Cache daemon encountered an error: {e}")
+
+            await asyncio.sleep(interval)
+
+    def start(self, interval: int = 3600):
+        if not self.api.enable_cache:
+            import logging
+            logging.getLogger(__name__).warning("Cache is not enabled. Daemon will not run.")
+            return
+        if self.task is None or self.task.done():
+            import asyncio
+            self.task = asyncio.get_running_loop().create_task(self._loop(interval))
+
+    def stop(self):
+        if self.task and not self.task.done():
+            self.task.cancel()
+            self.task = None

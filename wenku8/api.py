@@ -39,6 +39,8 @@ class Wenku8API:
             default_headers=True,
             curl_options={CurlOpt.FRESH_CONNECT: True}
         ), follow_redirects=True)
+        from .cache import CacheDaemon
+        self.cache_daemon = CacheDaemon(self)
 
     @functools.wraps(httpx.AsyncClient.request)
     async def _request(self, *args, **kwargs):
@@ -89,7 +91,7 @@ class Wenku8API:
         return resp.content
 
     @login_required
-    @with_cache(expires_days=3)
+    @with_cache(expires_days=None)
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
         if not self.cf_bypassed:
             await self.bypass_cloudflare(
@@ -134,7 +136,7 @@ class Wenku8API:
         )
 
     @login_required
-    @with_cache(expires_days=3)
+    @with_cache(expires_days=None)
     async def get_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset={lang}")
         resp.encoding = lang
@@ -187,7 +189,7 @@ class Wenku8API:
 
         return "".join(results)
 
-    @with_cache(expires_days=3)
+    @with_cache(expires_days=None)
     async def get_full_novel_content(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
         resp = await self._request("GET", f"https://dl.wenku8.com/down.php?type=utf8&node=1&id={aid}")
         return resp.text
@@ -324,3 +326,9 @@ class Wenku8API:
                                          finished=finished, updated_after_last_reading=updated_after_last_reading))
 
         return results
+
+    def start_cache_daemon(self, interval: int = 3600):
+        self.cache_daemon.start(interval)
+
+    def stop_cache_daemon(self):
+        self.cache_daemon.stop()
