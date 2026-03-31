@@ -27,7 +27,6 @@ def login_required(func):
 class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
     session: httpx.AsyncClient
-    cf_bypassed: bool = False
 
     def __init__(self, endpoint: str = "https://www.wenku8.net", enable_cache: bool = False,
                  cache_db_path: str = ".wenku8_cache.db"):
@@ -44,11 +43,22 @@ class Wenku8API:
 
     @functools.wraps(httpx.AsyncClient.request)
     async def _request(self, *args, **kwargs):
+        cf_bypassed_in_this_request = kwargs.pop('_cf_bypassed', False)
         try:
             result = await self.session.request(*args, **kwargs)
             result.raise_for_status()
             return result
         except httpx.HTTPStatusError as e:
+            if e.response.status_code in (403, 503) and not cf_bypassed_in_this_request:
+                url = args[1] if len(args) > 1 else kwargs.get('url')
+                if url:
+                    try:
+                        await self.bypass_cloudflare(str(url))
+                    except Exception:
+                        pass
+                    kwargs['_cf_bypassed'] = True
+                    return await self._request(*args, **kwargs)
+
             if e.response.status_code == 429 or e.response.status_code == 403:
                 raise RateLimitException
             else:
@@ -83,7 +93,6 @@ class Wenku8API:
         )
         self.session.headers.update({"User-Agent": user_agent})
         self.session.cookies.update(cookies)
-        self.cf_bypassed = True
 
     @with_cache(expires_days=None)
     async def get_novel_cover(self, aid: int):
@@ -93,9 +102,6 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
-        if not self.cf_bypassed:
-            await self.bypass_cloudflare(
-                self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
         resp = await self._request("GET", self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
         resp.encoding = lang
         parser = etree.HTML(resp.text)
@@ -272,9 +278,6 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=3)
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
-        if not self.cf_bypassed:
-            await self.bypass_cloudflare(
-                self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
         resp = await self._request("GET",
                                    self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
         resp.encoding = lang
