@@ -5,6 +5,7 @@ import pickle
 import random
 import time
 import zlib
+from asyncio import AbstractEventLoop
 
 import aiosqlite
 
@@ -239,14 +240,13 @@ class CacheDaemon:
 
             await asyncio.sleep(interval)
 
-    def start(self, interval: int = 3600):
+    def start(self, loop: AbstractEventLoop, interval: int = 3600):
         if not self.api.enable_cache:
             import logging
             logging.getLogger(__name__).warning("Cache is not enabled. Daemon will not run.")
             return
         if self.task is None or self.task.done():
-            import asyncio
-            self.task = asyncio.get_running_loop().create_task(self._loop(interval))
+            self.task = loop.create_task(self._loop(interval))
 
     def stop(self):
         if self.task and not self.task.done():
