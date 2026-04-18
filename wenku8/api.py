@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import re
 from urllib.parse import quote
@@ -330,8 +331,8 @@ class Wenku8API:
 
         return results
 
-    def start_cache_daemon(self, interval: int = 3600):
-        self.cache_daemon.start(interval)
+    def start_cache_daemon(self, loop: asyncio.AbstractEventLoop, interval: int = 3600):
+        self.cache_daemon.start(loop, interval)
 
     def stop_cache_daemon(self):
         self.cache_daemon.stop()
