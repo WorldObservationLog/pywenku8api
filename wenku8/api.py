@@ -11,7 +11,7 @@ from lxml import etree
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
 from wenku8.exceptions import NotLoggedInException, RateLimitException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
-from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content
+from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content, lang_convent
 from wenku8.cache import with_cache
 
 
@@ -103,8 +103,8 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset={lang}")
-        resp.encoding = lang
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset=gbk")
+        resp.encoding = "gbk"
         parser = etree.HTML(resp.text)
 
         if bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b/br'))):
@@ -125,7 +125,7 @@ class Wenku8API:
             latest_section = extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[4]/a')
             intro = "".join(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[6]//text()'))
 
-        return NovelInfo(
+        return lang_convent(NovelInfo(
             aid=aid,
             title=extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[1]/td/table/tr/td[1]/span/b'),
             author=extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[2]', True),
@@ -140,13 +140,13 @@ class Wenku8API:
             latest_section=latest_section,
             copyright=not bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b/br'))),
             animation=bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[1]/span/b')))
-        )
+        ), lang)
 
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset={lang}")
-        resp.encoding = lang
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset=gbk")
+        resp.encoding = "gbk"
         parser = etree.HTML(resp.text)
         volumes = []
         current_vol = None
@@ -172,17 +172,17 @@ class Wenku8API:
                 current_vol.chapters.append(_Chapter(cid=cid, title=link.text))
         if current_vol:
             volumes.append(current_vol)
-        return NovelIndex(aid=aid,
-                          title=extract_text(parser, '//*[@id="title"]'),
-                          author=extract_text(parser, '//*[@id="info"]', True),
-                          volumes=volumes)
+        return lang_convent(NovelIndex(aid=aid,
+                                       title=extract_text(parser, '//*[@id="title"]'),
+                                       author=extract_text(parser, '//*[@id="info"]', True),
+                                       volumes=volumes), lang)
 
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_content(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
         resp = await self._request("GET",
-                                   self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset={lang}")
-        resp.encoding = lang
+                                   self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset=gbk")
+        resp.encoding = "gbk"
         parser = etree.HTML(resp.text)
         results = []
         for child in parser.xpath('//*[@id="content"]')[0]:
@@ -194,12 +194,12 @@ class Wenku8API:
             if child.tail:
                 results.append(child.tail)
 
-        return "".join(results)
+        return lang_convent("".join(results), lang)
 
     @with_cache(expires_days=None)
     async def get_full_novel_content(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
         resp = await self._request("GET", f"https://dl.wenku8.com/down.php?type=utf8&node=1&id={aid}")
-        return resp.text
+        return lang_convent(resp.text, lang)
 
     @login_required
     @with_cache(expires_days=None)
@@ -231,7 +231,7 @@ class Wenku8API:
                 press = novel[1][1].text.split("  ")[1].split(":")[1]
 
             results.append(SearchItem(aid=re.search(r'(\d+).htm', novel[1][0][0].get("href")).group(1),
-                                      title=novel[1][0][0].get("tiptitle"),
+                                      title=novel[1][0][0].get("title"),
                                       author=novel[1][1].text.split("/")[0].split(":")[1],
                                       press=press,
                                       last_updated=last_updated,
@@ -251,19 +251,21 @@ class Wenku8API:
     @with_cache(expires_days=3)
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode('gbk'))}&page={page}")
-        resp.encoding = lang
+        keyword = lang_convent(keyword, Lang.zh_CN)
+        resp = await self._request("GET",
+                                   self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode('gbk'))}&page={page}")
+        resp.encoding = "gbk"
         if str(resp.url).endswith(".htm"):  # 只有一个结果时会跳转到对应的页面
             info = await self.get_novel_info(re.search(r"(\d*).htm", str(resp.url)).group(1), lang=lang)
-            return SearchResult(
+            return lang_convent(SearchResult(
                 results=[SearchItem(aid=info.aid, title=info.title, author=info.author, press=info.press,
                                     last_updated=info.last_updated, word_count=info.word_count,
                                     status=info.status, tags=info.tags, intro_preview=info.intro,
                                     copyright=info.copyright, animation=info.animation)],
-                page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1))
+                page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1)), lang)
         else:
             parser = etree.HTML(resp.text)
-            return self._search_page_parser(parser)
+            return lang_convent(self._search_page_parser(parser), lang)
 
     async def search_novel_by_name(self, keyword: str, page: int = 1, lang: Lang = Lang.zh_CN):
         return await self.search_novel(keyword, SearchMethod.NAME, page, lang)
@@ -279,15 +281,15 @@ class Wenku8API:
     @with_cache(expires_days=3)
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
         resp = await self._request("GET",
-                                   self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset={lang}")
-        resp.encoding = lang
+                                   self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset=gbk")
+        resp.encoding = "gbk"
         parser = etree.HTML(resp.text)
-        return self._search_page_parser(parser)
+        return lang_convent(self._search_page_parser(parser), lang)
 
     @login_required
     async def get_bookshelf(self, bid: int = 0, lang: Lang = Lang.zh_CN) -> list[BookshelfItem]:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}&charset={lang}")
-        resp.encoding = lang
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}&charset=gbk")
+        resp.encoding = "gbk"
         parser = etree.HTML(resp.text)
         results = []
         for novel in parser.xpath('//*[@id="checkform"]/table')[0]:
@@ -328,7 +330,7 @@ class Wenku8API:
                                          bookmark_cid=bookmark_cid, last_updated=novel[5].text.strip(),
                                          finished=finished, updated_after_last_reading=updated_after_last_reading))
 
-        return results
+        return lang_convent(results, lang)
 
     def start_cache_daemon(self, loop: asyncio.AbstractEventLoop, interval: int = 3600):
         self.cache_daemon.start(loop, interval)
