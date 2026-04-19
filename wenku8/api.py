@@ -251,8 +251,7 @@ class Wenku8API:
     @with_cache(expires_days=3)
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
-        resp = await self._request("GET",
-                                   self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode(lang))}&page={page}&charset={lang}")
+        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode('gbk'))}&page={page}")
         resp.encoding = lang
         if str(resp.url).endswith(".htm"):  # 只有一个结果时会跳转到对应的页面
             info = await self.get_novel_info(re.search(r"(\d*).htm", str(resp.url)).group(1), lang=lang)
