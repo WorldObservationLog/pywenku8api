@@ -357,7 +357,7 @@ class CloudflareSolver:
 
 async def get_cloudflare_clearance(
     url: str,
-    timeout: float = 30.0,
+    timeout: float = 60.0,
     headless: bool = True,
     proxy: Optional[str] = None,
     user_agent: Optional[str] = None,
