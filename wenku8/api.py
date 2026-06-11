@@ -81,7 +81,7 @@ class Wenku8API:
     def is_logged_in(self):
         return bool(self.session.cookies.get("PHPSESSID"))
 
-    async def bypass_cloudflare(self, url: str, timeout: float = 30.0, headless: bool = True, proxy: str = None):
+    async def bypass_cloudflare(self, url: str, timeout: float = 60.0, headless: bool = True, proxy: str = None):
         """
         通过运行本地无头浏览器获取 Cloudflare 的 cf_clearance Cookie 和真实的 User-Agent，
         并将其更新回当前的 HTTPX 会话中。以解决 403 / 503 等质询问题。
