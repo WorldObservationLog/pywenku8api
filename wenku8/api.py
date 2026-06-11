@@ -44,6 +44,7 @@ class Wenku8API:
 
     @functools.wraps(httpx.AsyncClient.request)
     async def _request(self, *args, **kwargs):
+        kwargs.update({"timeout": 30.0})
         cf_bypassed_in_this_request = kwargs.pop('_cf_bypassed', False)
         try:
             result = await self.session.request(*args, **kwargs)
