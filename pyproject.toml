@@ -10,14 +10,10 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.11"
-curl-cffi = "^0.14.0"
 lxml = "^6.0.2"
-httpx = "^0.28.1"
-httpx-curl-cffi = "^0.1.5"
 aiosqlite = "^0.20.0"
-latest-user-agents = "^0.0.5"
 zendriver = "^0.15.3"
-user-agents = "^2.2.0"
+httpx = "^0.28.1"
 
 [tool.poetry.group.dev.dependencies]
 python-dotenv = "^1.2.1"

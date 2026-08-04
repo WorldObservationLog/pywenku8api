@@ -1,15 +1,16 @@
 import asyncio
 import functools
 import re
+import time
 from urllib.parse import quote
 
 import httpx
 import lxml.html
-from httpx_curl_cffi import AsyncCurlTransport, CurlOpt
+import zendriver
 from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
-from wenku8.exceptions import NotLoggedInException, RateLimitException
+from wenku8.exceptions import NotLoggedInException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content, lang_convent
 from wenku8.cache import with_cache
@@ -18,7 +19,7 @@ from wenku8.cache import with_cache
 def login_required(func):
     @functools.wraps(func)
     async def wrapper(self, *args, **kwargs):
-        if self.session.cookies.get("PHPSESSID") is None:
+        if not self.is_logged_in:
             raise NotLoggedInException
         return await func(self, *args, **kwargs)
 
@@ -27,86 +28,159 @@ def login_required(func):
 
 class Wenku8API:
     ENDPOINT = "https://www.wenku8.net"
-    session: httpx.AsyncClient
+    # CDN 二进制资源仅校验 UA，用真实浏览器 UA 直连即可
+    _USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 
     def __init__(self, endpoint: str = "https://www.wenku8.net", enable_cache: bool = False,
-                 cache_db_path: str = ".wenku8_cache.db"):
+                 cache_db_path: str = ".wenku8_cache.db", headless: bool = True):
         self.ENDPOINT = endpoint
         self.enable_cache = enable_cache
         self.cache_db_path = cache_db_path
-        self.session = httpx.AsyncClient(transport=AsyncCurlTransport(
-            impersonate="chrome",
-            default_headers=True,
-            curl_options={CurlOpt.FRESH_CONNECT: True}
-        ), follow_redirects=True)
+        self.headless = headless
+        # 常驻浏览器，懒启动；_browser_lock 仅保护启动，_nav_lock 串行化页面导航
+        self._browser = None
+        self._browser_lock = asyncio.Lock()
+        self._nav_lock = asyncio.Lock()
+        self._phpsessid: str | None = None
         from .cache import CacheDaemon
         self.cache_daemon = CacheDaemon(self)
 
-    @functools.wraps(httpx.AsyncClient.request)
-    async def _request(self, *args, **kwargs):
-        kwargs.update({"timeout": 30.0})
-        cf_bypassed_in_this_request = kwargs.pop('_cf_bypassed', False)
-        try:
-            result = await self.session.request(*args, **kwargs)
-            result.raise_for_status()
-            return result
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (403, 503) and not cf_bypassed_in_this_request:
-                url = args[1] if len(args) > 1 else kwargs.get('url')
-                if url:
-                    try:
-                        await self.bypass_cloudflare(str(url))
-                    except Exception:
-                        pass
-                    kwargs['_cf_bypassed'] = True
-                    return await self._request(*args, **kwargs)
+    async def _ensure_browser(self):
+        """懒启动常驻浏览器（双重检查锁）。必须在 _nav_lock 之外调用以避免嵌套死锁。"""
+        if self._browser is None:
+            async with self._browser_lock:
+                if self._browser is None:
+                    self._browser = await zendriver.start(
+                        config=zendriver.Config(headless=self.headless, sandbox=False))
+        return self._browser
 
-            if e.response.status_code == 429 or e.response.status_code == 403:
-                raise RateLimitException
-            else:
-                raise e
+    async def close(self):
+        """关闭常驻浏览器，释放资源。"""
+        if self._browser is not None:
+            await self._browser.stop()
+            self._browser = None
+            self._phpsessid = None
+
+    @staticmethod
+    def _strip_tbody(html: str) -> str:
+        """浏览器渲染后的 DOM 会被注入 <tbody>，破坏现有不带 tbody 的 XPath，故剥离。"""
+        return re.sub(r"</?tbody[^>]*>", "", html, flags=re.IGNORECASE)
+
+    @staticmethod
+    def _is_cf_challenge(html: str) -> bool:
+        """判断是否为 Cloudflare 质询/拦截页。
+
+        正常页面也会注入 challenge-platform 脚本，故只能以质询页特有的 <title>
+        作为判据，避免对正常页面误报触发无谓的 reload。
+        """
+        head = html[:2048].lower()
+        return ("<title>just a moment" in head
+                or "<title>attention required" in head
+                or "正在验证您是否是真人" in head)
+
+    async def _wait_cf(self, tab, timeout: float = 60.0) -> str:
+        """等待页面加载完成并处理 Cloudflare 质询，返回最终 HTML。
+
+        tab.get() 对 wenku8 常在 body 渲染前就返回，故先等 readyState=complete，
+        否则会拿到只有 <head> 的空壳页面。
+        """
+        try:
+            await tab.wait_for_ready_state("complete", timeout=15)
+        except Exception:
+            pass
+        deadline = time.monotonic() + timeout
+        html = await tab.get_content()
+        while self._is_cf_challenge(html) and time.monotonic() < deadline:
+            try:
+                await tab.verify_cf()
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+            await tab.reload()
+            try:
+                await tab.wait_for_ready_state("complete", timeout=15)
+            except Exception:
+                pass
+            html = await tab.get_content()
+        return html
+
+    async def _refresh_cookies(self, browser) -> None:
+        """从浏览器 cookie jar 同步 PHPSESSID 到 self._phpsessid。"""
+        for cookie in await browser.cookies.get_all():
+            if cookie.name == "PHPSESSID":
+                self._phpsessid = cookie.value
+                return
+
+    async def _navigate(self, url: str, *, want_url: bool = False):
+        """导航到 url，处理 Cloudflare 质询，返回剥离 tbody 后的渲染 HTML。
+
+        渲染后的 DOM 已是正确解码的 Unicode（规避了 CDP getResponseBody 对 GBK 的误解码），
+        调用方直接 etree.HTML(html) 即可，无需再设置 encoding。
+        """
+        browser = await self._ensure_browser()
+        async with self._nav_lock:
+            tab = browser.main_tab
+            await tab.get(url)
+            try:
+                await tab.verify_cf()
+            except Exception:
+                pass
+            html = self._strip_tbody(await self._wait_cf(tab))
+            await self._refresh_cookies(browser)
+            if want_url:
+                final_url = await tab.evaluate("window.location.href")
+                return html, final_url
+            return html
+
+    async def _fetch_binary(self, url: str) -> bytes:
+        """通过 httpx 直接抓取二进制资源（封面图、整本 TXT 等）。
+
+        二进制资源位于 CDN（img.wenku8.com / dlN.wenku8.com），仅需浏览器 UA 即可通过，
+        无需浏览器/CDP。调用方传入的应是可直接访问的 CDN URL（见 get_novel_cover /
+        get_full_novel_content 的 URL 构造）。
+        """
+        async with httpx.AsyncClient(
+            headers={"User-Agent": self._USER_AGENT},
+            follow_redirects=True,
+            timeout=30.0,
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content
 
     async def login(self, username: str, password: str, validity: LoginValidity = LoginValidity.NONE) -> str:
-        form_data = {
-            "username": username,
-            "password": password,
-            "usercookie": validity,
-            "action": "login",
-            "submit": "%26%23160%3B%B5%C7%26%23160%3B%26%23160%3B%C2%BC%26%23160%3B"
-        }
-        resp = await self._request("POST", self.ENDPOINT + "/login.php", data=form_data)
-        return resp.cookies.get("PHPSESSID")
+        """访问登录页面，自动填充用户名密码并点击提交完成登录，返回 PHPSESSID。"""
+        browser = await self._ensure_browser()
+        async with self._nav_lock:
+            tab = browser.main_tab
+            # 裸 login.php 的 body 为空，登录表单在 login.php?do=submit
+            await tab.get(self.ENDPOINT + "/login.php?do=submit")
+            await self._wait_cf(tab)
+            await tab.wait_for("input[name=username]", timeout=15)
+            await (await tab.select("input[name=username]")).send_keys(username)
+            await (await tab.select("input[name=password]")).send_keys(password)
+            # usecookie 是 <select>，选项值与 LoginValidity 一致（内部枚举，无注入风险）
+            await tab.evaluate(
+                f'document.querySelector("select[name=usecookie]").value="{validity.value}"')
+            await (await tab.select("input[name=submit]")).click()
+            await asyncio.sleep(1)  # click 不自动等待导航完成
+            await self._wait_cf(tab)  # 跳转后可能再次遇到 Cloudflare
+            await self._refresh_cookies(browser)
+        return self._phpsessid
 
     @property
     def is_logged_in(self):
-        return bool(self.session.cookies.get("PHPSESSID"))
-
-    async def bypass_cloudflare(self, url: str, timeout: float = 60.0, headless: bool = True, proxy: str = None):
-        """
-        通过运行本地无头浏览器获取 Cloudflare 的 cf_clearance Cookie 和真实的 User-Agent，
-        并将其更新回当前的 HTTPX 会话中。以解决 403 / 503 等质询问题。
-        """
-        from .cf_solver import get_cloudflare_clearance
-        user_agent, cookies = await get_cloudflare_clearance(
-            url=url,
-            timeout=timeout,
-            headless=headless,
-            proxy=proxy
-        )
-        self.session.headers.update({"User-Agent": user_agent})
-        self.session.cookies.update(cookies)
+        return bool(self._phpsessid)
 
     @with_cache(expires_days=None)
     async def get_novel_cover(self, aid: int):
-        resp = await self._request("GET", f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
-        return resp.content
-
+        return await self._fetch_binary(f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset=gbk")
-        resp.encoding = "gbk"
-        parser = etree.HTML(resp.text)
+        html = await self._navigate(self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset=gbk")
+        parser = etree.HTML(html)
 
         if bool(len(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b/br'))):
             last_updated = None
@@ -146,9 +220,8 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset=gbk")
-        resp.encoding = "gbk"
-        parser = etree.HTML(resp.text)
+        html = await self._navigate(self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset=gbk")
+        parser = etree.HTML(html)
         volumes = []
         current_vol = None
         xpath_str = '//table[@class="css"]//td[@class="vcss" or @class="ccss"]'
@@ -181,10 +254,9 @@ class Wenku8API:
     @login_required
     @with_cache(expires_days=None)
     async def get_novel_content(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
-        resp = await self._request("GET",
-                                   self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset=gbk")
-        resp.encoding = "gbk"
-        parser = etree.HTML(resp.text)
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset=gbk")
+        parser = etree.HTML(html)
         results = []
         for child in parser.xpath('//*[@id="content"]')[0]:
             if child.tag == 'div':
@@ -199,8 +271,9 @@ class Wenku8API:
 
     @with_cache(expires_days=None)
     async def get_full_novel_content(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
-        resp = await self._request("GET", f"https://dl.wenku8.com/down.php?type=utf8&node=1&id={aid}")
-        return lang_convent(resp.text, lang)
+        """下载整本小说（UTF-8 TXT）。直接访问 CDN 静态文件，绕开 dl.wenku8.com 的 Cloudflare 质询。"""
+        body = await self._fetch_binary(f"https://dl1.wenku8.com/txtutf8/{int(aid) // 1000}/{aid}.txt")
+        return lang_convent(body.decode("utf-8"), lang)
 
     @login_required
     @with_cache(expires_days=None)
@@ -253,11 +326,11 @@ class Wenku8API:
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
         keyword = lang_convent(keyword, Lang.zh_CN)
-        resp = await self._request("GET",
-                                   self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode('gbk'))}&page={page}")
-        resp.encoding = "gbk"
-        if str(resp.url).endswith(".htm"):  # 只有一个结果时会跳转到对应的页面
-            info = await self.get_novel_info(re.search(r"(\d*).htm", str(resp.url)).group(1), lang=lang)
+        html, final_url = await self._navigate(
+            self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode('gbk'))}&page={page}",
+            want_url=True)
+        if final_url.endswith(".htm"):  # 只有一个结果时会跳转到对应的页面
+            info = await self.get_novel_info(re.search(r"(\d*).htm", final_url).group(1), lang=lang)
             return lang_convent(SearchResult(
                 results=[SearchItem(aid=info.aid, title=info.title, author=info.author, press=info.press,
                                     last_updated=info.last_updated, word_count=info.word_count,
@@ -265,7 +338,7 @@ class Wenku8API:
                                     copyright=info.copyright, animation=info.animation)],
                 page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1)), lang)
         else:
-            parser = etree.HTML(resp.text)
+            parser = etree.HTML(html)
             return lang_convent(self._search_page_parser(parser), lang)
 
     async def search_novel_by_name(self, keyword: str, page: int = 1, lang: Lang = Lang.zh_CN):
@@ -276,22 +349,20 @@ class Wenku8API:
 
     @with_cache(expires_days=None)
     async def get_picture(self, url: str):
-        return (await self._request("GET", url)).content
+        return await self._fetch_binary(url)
 
     @login_required
     @with_cache(expires_days=3)
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
-        resp = await self._request("GET",
-                                   self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset=gbk")
-        resp.encoding = "gbk"
-        parser = etree.HTML(resp.text)
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset=gbk")
+        parser = etree.HTML(html)
         return lang_convent(self._search_page_parser(parser), lang)
 
     @login_required
     async def get_bookshelf(self, bid: int = 0, lang: Lang = Lang.zh_CN) -> list[BookshelfItem]:
-        resp = await self._request("GET", self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}&charset=gbk")
-        resp.encoding = "gbk"
-        parser = etree.HTML(resp.text)
+        html = await self._navigate(self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}&charset=gbk")
+        parser = etree.HTML(html)
         results = []
         for novel in parser.xpath('//*[@id="checkform"]/table')[0]:
             if novel.get("align") == "center":
