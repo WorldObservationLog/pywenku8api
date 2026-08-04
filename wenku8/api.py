@@ -347,7 +347,8 @@ class Wenku8API:
 
     @login_required
     async def get_bookshelf(self, bid: int = 0, lang: Lang = Lang.zh_CN) -> list[BookshelfItem]:
-        html = await self._navigate(self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}&charset=gbk")
+        # bookcase.php 不支持 charset 参数，带上去会被 Cloudflare 拦截
+        html = await self._navigate(self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}")
         parser = etree.HTML(html)
         results = []
         for novel in parser.xpath('//*[@id="checkform"]/table')[0]:
