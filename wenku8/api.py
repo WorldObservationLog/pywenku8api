@@ -65,12 +65,17 @@ class Wenku8API:
     def _is_cf_challenge(html: str) -> bool:
         """判断是否为 Cloudflare 质询/拦截页。
 
-        正常页面也会注入 challenge-platform 脚本，故只能以质询页特有的 <title>
-        作为判据，避免对正常页面误报触发无谓的 reload。
+        正常页面也会注入 challenge-platform 脚本，故只能以质询页特有的标志为判据：
+        - 英文质询页 title 为 "Just a moment" / "Attention Required!"
+        - 中文质询页 title 为 "请稍候…"，body 含 "正在进行安全验证" 与 `_cf_chl_opt`
+        注意页面本身可能被 _strip_tbody 处理过，故 head 取前 4096 字节覆盖 title 与 body 开头。
         """
-        head = html[:2048].lower()
+        head = html[:4096].lower()
         return ("<title>just a moment" in head
                 or "<title>attention required" in head
+                or "<title>请稍候" in head
+                or "正在进行安全验证" in head
+                or "_cf_chl_opt" in head
                 or "正在验证您是否是真人" in head)
 
     async def _wait_cf(self, tab, timeout: float = 60.0) -> str:
@@ -78,6 +83,9 @@ class Wenku8API:
 
         tab.get() 对 wenku8 常在 body 渲染前就返回，故先等 readyState=complete，
         否则会拿到只有 <head> 的空壳页面。
+
+        仅当页面确认为 CF 质询/拦截页（_is_cf_challenge）时才调 verify_cf 解决，
+        正常页面直接返回，避免无谓的等待。
         """
         try:
             await tab.wait_for_ready_state("complete", timeout=15)
@@ -91,7 +99,18 @@ class Wenku8API:
             except Exception:
                 pass
             await asyncio.sleep(2)
-            await tab.reload()
+            # verify_cf 可能已解决质询：若页面恢复，等 readyState=complete 确保
+            # 目标内容完全加载后再返回，避免拿到半加载的中间页
+            if not self._is_cf_challenge(await tab.get_content()):
+                try:
+                    await tab.wait_for_ready_state("complete", timeout=15)
+                except Exception:
+                    pass
+                return await tab.get_content()
+            try:
+                await tab.reload()
+            except Exception:
+                pass
             try:
                 await tab.wait_for_ready_state("complete", timeout=15)
             except Exception:
@@ -116,10 +135,8 @@ class Wenku8API:
         async with self._nav_lock:
             tab = browser.main_tab
             await tab.get(url)
-            try:
-                await tab.verify_cf()
-            except Exception:
-                pass
+            # 不要无条件调 verify_cf：它会对非质询页空等 15s 超时。
+            # _wait_cf 内部已用 _is_cf_challenge 判断，只在真遇质询时处理。
             html = self._strip_tbody(await self._wait_cf(tab))
             await self._refresh_cookies(browser)
             if want_url:
