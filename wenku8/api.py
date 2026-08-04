@@ -13,7 +13,6 @@ from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
 from wenku8.exceptions import NotLoggedInException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content, lang_convent
-from wenku8.cache import with_cache
 
 
 def login_required(func):
@@ -32,19 +31,14 @@ class Wenku8API:
     _USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 
-    def __init__(self, endpoint: str = "https://www.wenku8.net", enable_cache: bool = False,
-                 cache_db_path: str = ".wenku8_cache.db", headless: bool = True):
+    def __init__(self, endpoint: str = "https://www.wenku8.net", headless: bool = True):
         self.ENDPOINT = endpoint
-        self.enable_cache = enable_cache
-        self.cache_db_path = cache_db_path
         self.headless = headless
         # 常驻浏览器，懒启动；_browser_lock 仅保护启动，_nav_lock 串行化页面导航
         self._browser = None
         self._browser_lock = asyncio.Lock()
         self._nav_lock = asyncio.Lock()
         self._phpsessid: str | None = None
-        from .cache import CacheDaemon
-        self.cache_daemon = CacheDaemon(self)
 
     async def _ensure_browser(self):
         """懒启动常驻浏览器（双重检查锁）。必须在 _nav_lock 之外调用以避免嵌套死锁。"""
@@ -173,11 +167,10 @@ class Wenku8API:
     def is_logged_in(self):
         return bool(self._phpsessid)
 
-    @with_cache(expires_days=None)
     async def get_novel_cover(self, aid: int):
         return await self._fetch_binary(f"https://img.wenku8.com/image/{int(aid) // 1000}/{aid}/{aid}s.jpg")
+
     @login_required
-    @with_cache(expires_days=None)
     async def get_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
         html = await self._navigate(self.ENDPOINT + f"/modules/article/articleinfo.php?id={aid}&charset=gbk")
         parser = etree.HTML(html)
@@ -218,7 +211,6 @@ class Wenku8API:
         ), lang)
 
     @login_required
-    @with_cache(expires_days=None)
     async def get_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
         html = await self._navigate(self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&charset=gbk")
         parser = etree.HTML(html)
@@ -252,7 +244,6 @@ class Wenku8API:
                                        volumes=volumes), lang)
 
     @login_required
-    @with_cache(expires_days=None)
     async def get_novel_content(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
         html = await self._navigate(
             self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset=gbk")
@@ -269,14 +260,12 @@ class Wenku8API:
 
         return lang_convent("".join(results), lang)
 
-    @with_cache(expires_days=None)
     async def get_full_novel_content(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
         """下载整本小说（UTF-8 TXT）。直接访问 CDN 静态文件，绕开 dl.wenku8.com 的 Cloudflare 质询。"""
         body = await self._fetch_binary(f"https://dl1.wenku8.com/txtutf8/{int(aid) // 1000}/{aid}.txt")
         return lang_convent(body.decode("utf-8"), lang)
 
     @login_required
-    @with_cache(expires_days=None)
     async def get_novel_content_via_full(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
         full_content = await self.get_full_novel_content(aid, lang)
         novel_index = await self.get_novel_index(aid, lang)
@@ -322,7 +311,6 @@ class Wenku8API:
 
     @login_required
     @cooldown(5)
-    @with_cache(expires_days=3)
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
         keyword = lang_convent(keyword, Lang.zh_CN)
@@ -347,12 +335,10 @@ class Wenku8API:
     async def search_novel_by_author(self, keyword: str, page: int = 1, lang: Lang = Lang.zh_CN):
         return await self.search_novel(keyword, SearchMethod.AUTHOR, page, lang)
 
-    @with_cache(expires_days=None)
     async def get_picture(self, url: str):
         return await self._fetch_binary(url)
 
     @login_required
-    @with_cache(expires_days=3)
     async def get_novel_list(self, sort: NovelSortMethod, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
         html = await self._navigate(
             self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset=gbk")
@@ -403,9 +389,3 @@ class Wenku8API:
                                          finished=finished, updated_after_last_reading=updated_after_last_reading))
 
         return lang_convent(results, lang)
-
-    def start_cache_daemon(self, loop: asyncio.AbstractEventLoop, interval: int = 3600):
-        self.cache_daemon.start(loop, interval)
-
-    def stop_cache_daemon(self):
-        self.cache_daemon.stop()
