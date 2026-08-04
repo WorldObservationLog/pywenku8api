@@ -293,8 +293,10 @@ class Wenku8API:
             else:
                 press = novel[1][1].text.split("  ")[1].split(":")[1]
 
-            results.append(SearchItem(aid=re.search(r'(\d+).htm', novel[1][0][0].get("href")).group(1),
-                                      title=novel[1][0][0].get("title"),
+            link = novel[1][0][0]
+            title_link = link.get("title") or (link.text or "").strip()
+            results.append(SearchItem(aid=re.search(r'(\d+).htm', link.get("href")).group(1),
+                                      title=title_link,
                                       author=novel[1][1].text.split("/")[0].split(":")[1],
                                       press=press,
                                       last_updated=last_updated,
