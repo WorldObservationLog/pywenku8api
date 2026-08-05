@@ -10,7 +10,7 @@ import zendriver
 from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
-from wenku8.exceptions import NotLoggedInException, CloudflareChallengeException
+from wenku8.exceptions import NotLoggedInException, CloudflareChallengeException, PageParseError
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content, lang_convent
 
@@ -279,8 +279,13 @@ class Wenku8API:
         html = await self._navigate(
             self.ENDPOINT + f"/modules/article/reader.php?aid={aid}&cid={cid}&charset=gbk")
         parser = etree.HTML(html)
+        content_nodes = parser.xpath('//*[@id="content"]')
+        if not content_nodes:
+            # 页面异常（CF 质询残留/等待页/404）时无 #content 节点
+            raise PageParseError("章节页面缺少 #content 节点", html,
+                                 xpath='//*[@id="content"]')
         results = []
-        for child in parser.xpath('//*[@id="content"]')[0]:
+        for child in content_nodes[0]:
             if child.tag == 'div':
                 href = child[0].get('href')
                 results.append(f"<!--image-->{href}<!--image-->")
@@ -328,9 +333,14 @@ class Wenku8API:
         novel_index = await self.get_novel_index(aid, lang)
         return get_chapter_content(full_content, novel_index, cid)
 
-    def _search_page_parser(self, parser: lxml.html.Element):
+    def _search_page_parser(self, html: str, parser: lxml.html.Element):
         results = []
-        for novel in parser.xpath('//*[@id="content"]/table/tr/td')[0]:
+        content_nodes = parser.xpath('//*[@id="content"]/table/tr/td')
+        if not content_nodes:
+            # 页面异常（CF 质询残留/等待页/404）时无内容节点
+            raise PageParseError("搜索/列表页面缺少内容节点", html,
+                                 xpath='//*[@id="content"]/table/tr/td')
+        for novel in content_nodes[0]:
             if len(novel[1][2].text.split("/")) < 3:
                 # 版权本，没有最近更新和字数
                 last_updated = None
@@ -365,7 +375,11 @@ class Wenku8API:
                                       animation=animation
                                       ))
 
-        page_control_str = parser.xpath('//*[@id="pagestats"]')[0].text
+        pagestats_nodes = parser.xpath('//*[@id="pagestats"]')
+        if not pagestats_nodes or not pagestats_nodes[0].text:
+            raise PageParseError("搜索/列表页面缺少 #pagestats 节点", html,
+                                 xpath='//*[@id="pagestats"]')
+        page_control_str = pagestats_nodes[0].text
         return SearchResult(results=results, page_control=PageControl.from_str(page_control_str))
 
     @login_required
@@ -386,7 +400,7 @@ class Wenku8API:
                 page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1)), lang)
         else:
             parser = etree.HTML(html)
-            return lang_convent(self._search_page_parser(parser), lang)
+            return lang_convent(self._search_page_parser(html, parser), lang)
 
     async def search_novel_by_name(self, keyword: str, page: int = 1, lang: Lang = Lang.zh_CN):
         return await self.search_novel(keyword, SearchMethod.NAME, page, lang)
@@ -402,15 +416,19 @@ class Wenku8API:
         html = await self._navigate(
             self.ENDPOINT + f"/modules/article/toplist.php?sort={sort}&page={page}&charset=gbk")
         parser = etree.HTML(html)
-        return lang_convent(self._search_page_parser(parser), lang)
+        return lang_convent(self._search_page_parser(html, parser), lang)
 
     @login_required
     async def get_bookshelf(self, bid: int = 0, lang: Lang = Lang.zh_CN) -> list[BookshelfItem]:
         # bookcase.php 不支持 charset 参数，带上去会被 Cloudflare 拦截
         html = await self._navigate(self.ENDPOINT + f"/modules/article/bookcase.php?classid={bid}")
         parser = etree.HTML(html)
+        table_nodes = parser.xpath('//*[@id="checkform"]/table')
+        if not table_nodes:
+            raise PageParseError("书架页面缺少 #checkform/table", html,
+                                 xpath='//*[@id="checkform"]/table')
         results = []
-        for novel in parser.xpath('//*[@id="checkform"]/table')[0]:
+        for novel in table_nodes[0]:
             if novel.get("align") == "center":
                 continue
             if len(novel) == 1:
