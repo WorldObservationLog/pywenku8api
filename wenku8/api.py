@@ -181,6 +181,11 @@ class Wenku8API:
             # 不要无条件调 verify_cf：它会对非质询页空等 15s 超时。
             # _wait_cf 内部已用 _is_cf_challenge 判断，只在真遇质询时处理。
             html = self._strip_tbody(await self._wait_cf(tab))
+            # 兜底：任何情况下都不把 CF 封禁/质询页返回给解析方法
+            if self._is_cf_blocked(html):
+                raise RateLimitException(f"Cloudflare 封禁/IP 限流: {html[:2000]}")
+            if self._is_cf_challenge(html):
+                raise TimeoutError("Cloudflare 质询在限时内未解决")
             await self._refresh_cookies(browser)
             if want_url:
                 final_url = await tab.evaluate("window.location.href")
