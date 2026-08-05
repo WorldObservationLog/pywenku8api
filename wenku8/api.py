@@ -10,7 +10,7 @@ import zendriver
 from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
-from wenku8.exceptions import NotLoggedInException
+from wenku8.exceptions import NotLoggedInException, CloudflareChallengeException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content, lang_convent
 
@@ -155,9 +155,10 @@ class Wenku8API:
     async def _fetch_binary(self, url: str) -> bytes:
         """通过 httpx 直接抓取二进制资源（封面图、整本 TXT 等）。
 
-        二进制资源位于 CDN（img.wenku8.com / dlN.wenku8.com），仅需浏览器 UA 即可通过，
-        无需浏览器/CDP。调用方传入的应是可直接访问的 CDN URL（见 get_novel_cover /
-        get_full_novel_content 的 URL 构造）。
+        二进制资源位于 CDN（img.wenku8.com / dlN.wenku8.com），正常仅需浏览器 UA
+        即可通过。但 CDN 可能配置 Cloudflare 防火墙：httpx 的 TLS 指纹与真实浏览器
+        不同，遇到质询时无法通过。检测到质询响应（非 200 或质询页）即抛
+        CloudflareChallengeException，不尝试浏览器质询。
         """
         async with httpx.AsyncClient(
             headers={"User-Agent": self._USER_AGENT},
@@ -165,6 +166,11 @@ class Wenku8API:
             timeout=30.0,
         ) as client:
             resp = await client.get(url)
+            # CF 质询页：HTTP 403/503 且响应体是质询页 → 明确错误
+            if self._is_cf_challenge(resp.content[:4096].decode("utf-8", "ignore")):
+                raise CloudflareChallengeException(
+                    f"CDN 资源被 Cloudflare 防火墙拦截: {url} (HTTP {resp.status_code})")
+            # 其他非 200（含 429，由 get_full_novel_content 做节点回退）
             resp.raise_for_status()
             return resp.content
 
