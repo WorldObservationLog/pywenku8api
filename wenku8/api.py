@@ -10,7 +10,7 @@ import zendriver
 from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
-from wenku8.exceptions import NotLoggedInException, CloudflareChallengeException, PageParseError
+from wenku8.exceptions import NotLoggedInException, CloudflareChallengeException, PageParseError, RateLimitException
 from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content, lang_convent
 
@@ -67,12 +67,12 @@ class Wenku8API:
 
     @staticmethod
     def _is_cf_challenge(html: str) -> bool:
-        """判断是否为 Cloudflare 质询/拦截页。
+        """判断是否为 Cloudflare 质询/拦截页（含质询与封禁两类）。
 
-        正常页面也会注入 challenge-platform 脚本，故只能以质询页特有的标志为判据：
-        - 英文质询页 title 为 "Just a moment" / "Attention Required!"
-        - 中文质询页 title 为 "请稍候…"，body 含 "正在进行安全验证" 与 `_cf_chl_opt`
-        注意页面本身可能被 _strip_tbody 处理过，故 head 取前 4096 字节覆盖 title 与 body 开头。
+        - 质询页（可尝试 verify_cf 解决）："Just a moment" / "Attention Required!"
+          / 中文「请稍候…」/ "正在进行安全验证" / _cf_chl_opt / "正在验证您是否是真人"
+        - 封禁页（不可解决，IP 被限流/拦截）："Access denied" / "used Cloudflare to
+          restrict access" / "errorCode" / "cf-error-details" / 错误码 1015
         """
         head = html[:4096].lower()
         return ("<title>just a moment" in head
@@ -80,16 +80,33 @@ class Wenku8API:
                 or "<title>请稍候" in head
                 or "正在进行安全验证" in head
                 or "_cf_chl_opt" in head
-                or "正在验证您是否是真人" in head)
+                or "正在验证您是否是真人" in head
+                or "access denied" in head
+                or "used cloudflare to restrict access" in head
+                or "errorcode" in head
+                or "cf-error-details" in head
+                or "cf-error-code" in head)
+
+    @staticmethod
+    def _is_cf_blocked(html: str) -> bool:
+        """判断是否为 Cloudflare 封禁页（IP 被限流/拦截，无法通过质询解决）。"""
+        head = html[:4096].lower()
+        return ("access denied" in head
+                or "used cloudflare to restrict access" in head
+                or "cf-error-details" in head
+                or "cf-error-code" in head
+                or "errorcode" in head)
 
     async def _wait_cf(self, tab, timeout: float = 60.0) -> str:
-        """等待页面加载完成并处理 Cloudflare 质询，返回最终 HTML。
+        """等待页面加载完成并处理 Cloudflare 质询/封禁，返回最终 HTML。
 
         tab.get() 对 wenku8 常在 body 渲染前就返回，故先等 readyState=complete，
         否则会拿到只有 <head> 的空壳页面。
 
-        仅当页面确认为 CF 质询/拦截页（_is_cf_challenge）时才调 verify_cf 解决，
-        正常页面直接返回，避免无谓的等待。
+        - 仅当页面确认为 CF 质询页（_is_cf_challenge 且非封禁）才调 verify_cf 解决，
+          正常页面直接返回，避免无谓的等待。
+        - CF 封禁页（IP 被限流/拦截，如错误码 1015）无法通过质询解决，立即抛
+          RateLimitException（携带页面内容）而非空转至超时。
         """
         try:
             await tab.wait_for_ready_state("complete", timeout=15)
@@ -98,6 +115,8 @@ class Wenku8API:
         deadline = time.monotonic() + timeout
         html = await tab.get_content()
         while self._is_cf_challenge(html) and time.monotonic() < deadline:
+            if self._is_cf_blocked(html):
+                raise RateLimitException(f"Cloudflare 封禁/IP 限流: {html[:2000]}")
             try:
                 await tab.verify_cf()
             except Exception:
@@ -120,6 +139,8 @@ class Wenku8API:
             except Exception:
                 pass
             html = await tab.get_content()
+        if self._is_cf_blocked(html):
+            raise RateLimitException(f"Cloudflare 封禁/IP 限流: {html[:2000]}")
         if self._is_cf_challenge(html):
             # 质询在 timeout 内未解决：返回质询页只会让调用方解析崩溃，
             # 不如抛明确异常，由上层决定重试。
