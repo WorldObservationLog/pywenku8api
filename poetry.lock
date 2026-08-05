@@ -135,6 +135,7 @@ anyio = "*"
 certifi = "*"
 httpcore = "==1.*"
 idna = "*"
+socksio = {version = "==1.*", optional = true, markers = "extra == \"socks\""}
 
 [package.extras]
 brotli = ["brotli", "brotlicffi"]
@@ -335,6 +336,17 @@ files = [
 
 [package.extras]
 cli = ["click (>=5.0)"]
+
+[[package]]
+name = "socksio"
+version = "1.0.0"
+description = "Sans-I/O implementation of SOCKS4, SOCKS4A, and SOCKS5."
+optional = false
+python-versions = ">=3.6"
+files = [
+    {file = "socksio-1.0.0-py3-none-any.whl", hash = "sha256:95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3"},
+    {file = "socksio-1.0.0.tar.gz", hash = "sha256:f88beb3da5b5c38b9890469de67d0cb0f9d494b78b106ca1845f96c10b91c4ac"},
+]
 
 [[package]]
 name = "typing-extensions"
@@ -541,4 +553,4 @@ websockets = ">=14.0"
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "6f950d3d1b6fca5e0a4598ef76ef2cce1ae7def923626c904e6d1ec1502857cc"
+content-hash = "9f2cac7f5c45e5159bc86c455c542721c4f6ea57d5830d55144ae55669b0a6d6"

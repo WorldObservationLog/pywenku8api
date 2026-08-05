@@ -33,9 +33,16 @@ class Wenku8API:
     # 整本下载短时缓存：30 分钟，减少重复下载
     _FULL_CONTENT_CACHE_TTL = 30 * 60
 
-    def __init__(self, endpoint: str = "https://www.wenku8.net", headless: bool = True):
+    def __init__(self, endpoint: str = "https://www.wenku8.net", headless: bool = True,
+                 proxy: str | None = None):
+        """初始化 Wenku8API。
+
+        proxy: SOCKS5/HTTP 代理 URL，如 "socks5h://127.0.0.1:1080"。同时作用于
+               httpx 下载与 zendriver 浏览器。None 表示直连。
+        """
         self.ENDPOINT = endpoint
         self.headless = headless
+        self.proxy = proxy
         # 常驻浏览器，懒启动；_browser_lock 仅保护启动，_nav_lock 串行化页面导航
         self._browser = None
         self._browser_lock = asyncio.Lock()
@@ -49,8 +56,15 @@ class Wenku8API:
         if self._browser is None:
             async with self._browser_lock:
                 if self._browser is None:
+                    browser_args = None
+                    if self.proxy:
+                        # Chromium 的 --proxy-server 不识别 socks5h scheme，须转成 socks5。
+                        # Chromium 的 SOCKS5 默认在代理端解析 DNS，等效 socks5h。
+                        chrome_proxy = self.proxy.replace("socks5h://", "socks5://")
+                        browser_args = [f"--proxy-server={chrome_proxy}"]
                     self._browser = await zendriver.start(
-                        config=zendriver.Config(headless=self.headless, sandbox=False))
+                        config=zendriver.Config(headless=self.headless, sandbox=False,
+                                                browser_args=browser_args))
         return self._browser
 
     async def close(self):
@@ -185,6 +199,7 @@ class Wenku8API:
             headers={"User-Agent": self._USER_AGENT},
             follow_redirects=True,
             timeout=30.0,
+            proxy=self.proxy,
         ) as client:
             resp = await client.get(url)
             # CF 质询页：HTTP 403/503 且响应体是质询页 → 明确错误
