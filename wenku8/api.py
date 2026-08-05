@@ -30,6 +30,8 @@ class Wenku8API:
     # CDN 二进制资源仅校验 UA，用真实浏览器 UA 直连即可
     _USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+    # 整本下载短时缓存：30 分钟，减少重复下载
+    _FULL_CONTENT_CACHE_TTL = 30 * 60
 
     def __init__(self, endpoint: str = "https://www.wenku8.net", headless: bool = True):
         self.ENDPOINT = endpoint
@@ -39,6 +41,8 @@ class Wenku8API:
         self._browser_lock = asyncio.Lock()
         self._nav_lock = asyncio.Lock()
         self._phpsessid: str | None = None
+        # 整本下载内存缓存：{(aid, lang): (expire_time, content)}
+        self._full_content_cache: dict[tuple[int, "Lang"], tuple[float, str]] = {}
 
     async def _ensure_browser(self):
         """懒启动常驻浏览器（双重检查锁）。必须在 _nav_lock 之外调用以避免嵌套死锁。"""
@@ -285,13 +289,23 @@ class Wenku8API:
         """下载整本小说（UTF-8 TXT）。直接访问 CDN 静态文件，绕开 dl.wenku8.com 的 Cloudflare 质询。
 
         CDN 有多个节点（dl1/dl2），单个节点可能返回 429 限流，逐节点回退重试。
+        结果按 (aid, lang) 做 30 分钟内存缓存，避免 get_novel_content_via_full
+        反复下载同一本整本。
         """
+        cache_key = (aid, lang)
+        now = time.monotonic()
+        cached = self._full_content_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1]
+
         last_err = None
         for node in (1, 2):
             url = f"https://dl{node}.wenku8.com/txtutf8/{int(aid) // 1000}/{aid}.txt"
             try:
                 body = await self._fetch_binary(url)
-                return lang_convent(body.decode("utf-8"), lang)
+                content = lang_convent(body.decode("utf-8"), lang)
+                self._full_content_cache[cache_key] = (now + self._FULL_CONTENT_CACHE_TTL, content)
+                return content
             except httpx.HTTPStatusError as e:
                 last_err = e
                 if e.response.status_code != 429:
