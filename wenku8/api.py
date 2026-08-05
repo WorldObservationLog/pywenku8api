@@ -278,9 +278,21 @@ class Wenku8API:
         return lang_convent("".join(results), lang)
 
     async def get_full_novel_content(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
-        """下载整本小说（UTF-8 TXT）。直接访问 CDN 静态文件，绕开 dl.wenku8.com 的 Cloudflare 质询。"""
-        body = await self._fetch_binary(f"https://dl1.wenku8.com/txtutf8/{int(aid) // 1000}/{aid}.txt")
-        return lang_convent(body.decode("utf-8"), lang)
+        """下载整本小说（UTF-8 TXT）。直接访问 CDN 静态文件，绕开 dl.wenku8.com 的 Cloudflare 质询。
+
+        CDN 有多个节点（dl1/dl2），单个节点可能返回 429 限流，逐节点回退重试。
+        """
+        last_err = None
+        for node in (1, 2):
+            url = f"https://dl{node}.wenku8.com/txtutf8/{int(aid) // 1000}/{aid}.txt"
+            try:
+                body = await self._fetch_binary(url)
+                return lang_convent(body.decode("utf-8"), lang)
+            except httpx.HTTPStatusError as e:
+                last_err = e
+                if e.response.status_code != 429:
+                    raise
+        raise last_err
 
     @login_required
     async def get_novel_content_via_full(self, aid: int, cid: int, lang: Lang = Lang.zh_CN) -> str:
