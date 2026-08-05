@@ -305,6 +305,10 @@ class Wenku8API:
                 body = await self._fetch_binary(url)
                 content = lang_convent(body.decode("utf-8"), lang)
                 self._full_content_cache[cache_key] = (now + self._FULL_CONTENT_CACHE_TTL, content)
+                # 惰性清理：写新缓存时顺带移除已过期条目，防止缓存无限增长
+                for k, (expire, _) in list(self._full_content_cache.items()):
+                    if expire <= now:
+                        del self._full_content_cache[k]
                 return content
             except httpx.HTTPStatusError as e:
                 last_err = e
