@@ -116,6 +116,10 @@ class Wenku8API:
             except Exception:
                 pass
             html = await tab.get_content()
+        if self._is_cf_challenge(html):
+            # 质询在 timeout 内未解决：返回质询页只会让调用方解析崩溃，
+            # 不如抛明确异常，由上层决定重试。
+            raise TimeoutError("Cloudflare 质询在限时内未解决")
         return html
 
     async def _refresh_cookies(self, browser) -> None:
@@ -201,12 +205,12 @@ class Wenku8API:
             intro = "".join(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[4]//text()'))
         else:
             last_updated = extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[4]', True)
-            word_count = int(
-                extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[5]', True).replace("字", ""))
-            popularity_level = separate_chinese_colon(
-                extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b').split("，")[0])[1]
-            trending_level = separate_chinese_colon(
-                extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b').split("，")[1])[1]
+            word_count_str = extract_text(parser, '//*[@id="content"]/div[1]/table[1]/tr[2]/td[5]', True).replace("字", "")
+            word_count = int(word_count_str) if word_count_str else None
+            rating_parts = extract_text(
+                parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[2]/b').split("，")
+            popularity_level = separate_chinese_colon(rating_parts[0])[1] if rating_parts else None
+            trending_level = separate_chinese_colon(rating_parts[1])[1] if len(rating_parts) > 1 else None
             latest_section = extract_text(parser, '//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[4]/a')
             intro = "".join(parser.xpath('//*[@id="content"]/div[1]/table[2]/tr/td[2]/span[6]//text()'))
 

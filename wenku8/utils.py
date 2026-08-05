@@ -21,17 +21,32 @@ BIG5_TO_GB = str.maketrans(
 
 
 def extract_text(parser: Element, xpath: str, split: bool = False) -> str:
+    """提取 XPath 首个节点的文本。节点缺失时返回空串而非抛异常。
+
+    wenku8 页面偶发返回 Cloudflare 质询残留页/异常页，此时页面结构不完整，
+    若直接 parser.xpath(xpath)[0] 会 IndexError 导致整个请求失败。返回空串
+    让调用方容错。
+    """
+    nodes = parser.xpath(xpath)
+    if not nodes or nodes[0].text is None:
+        return ""
     if split:
-        return separate_chinese_colon(parser.xpath(xpath)[0].text)[1]
+        return separate_chinese_colon(nodes[0].text)[1]
     else:
-        return parser.xpath(xpath)[0].text
+        return nodes[0].text
 
 
 def separate_chinese_colon(text: str):
+    """按中文冒号分割文本。无冒号时返回 [text, ""]，避免调用方 [1] 越界。"""
+    if not text:
+        return ["", ""]
     if "︰" in text:
-        return text.split("︰")
+        parts = text.split("︰")
     else:
-        return text.split("：")
+        parts = text.split("：")
+    if len(parts) == 1:
+        parts.append("")
+    return parts
 
 
 def cooldown(seconds):
