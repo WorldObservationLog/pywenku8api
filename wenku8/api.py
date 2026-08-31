@@ -8,6 +8,7 @@ import httpx
 import lxml.html
 import zendriver
 from lxml import etree
+from zendriver.core.cloudflare import cf_is_interactive_challenge_present
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
 from wenku8.exceptions import NotLoggedInException, CloudflareChallengeException, PageParseError, RateLimitException
@@ -128,31 +129,41 @@ class Wenku8API:
             pass
         deadline = time.monotonic() + timeout
         html = await tab.get_content()
+        verification_attempted = False
         while self._is_cf_challenge(html) and time.monotonic() < deadline:
             if self._is_cf_blocked(html):
                 raise RateLimitException(f"Cloudflare 封禁/IP 限流: {html[:2000]}")
-            try:
-                await tab.verify_cf()
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-            # verify_cf 可能已解决质询：若页面恢复，等 readyState=complete 确保
-            # 目标内容完全加载后再返回，避免拿到半加载的中间页
-            if not self._is_cf_challenge(await tab.get_content()):
+
+            # Non-interactive challenges complete through page JavaScript and must
+            # not be reloaded. Zendriver's verify_cf only handles a visible
+            # interactive Turnstile iframe, so call it at most once and only when
+            # that iframe is actually present.
+            remaining = deadline - time.monotonic()
+            if not verification_attempted and remaining > 0:
+                try:
+                    interactive = await cf_is_interactive_challenge_present(
+                        tab, timeout=min(1.0, remaining))
+                except Exception:
+                    interactive = False
+                if interactive:
+                    verification_attempted = True
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        try:
+                            await tab.verify_cf(timeout=min(15.0, remaining))
+                        except Exception:
+                            pass
+
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(0.5, remaining))
+            html = await tab.get_content()
+            if not self._is_cf_challenge(html):
                 try:
                     await tab.wait_for_ready_state("complete", timeout=15)
                 except Exception:
                     pass
                 return await tab.get_content()
-            try:
-                await tab.reload()
-            except Exception:
-                pass
-            try:
-                await tab.wait_for_ready_state("complete", timeout=15)
-            except Exception:
-                pass
-            html = await tab.get_content()
         if self._is_cf_blocked(html):
             raise RateLimitException(f"Cloudflare 封禁/IP 限流: {html[:2000]}")
         if self._is_cf_challenge(html):
