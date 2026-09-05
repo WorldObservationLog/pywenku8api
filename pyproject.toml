@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "pywenku8api"
-version = "0.1.0"
-description = ""
+version = "0.2.0"
+description = "Wenku8 轻小说文库多来源统一 API：Web / API 中继，含 Cloudflare 过盾、来源级限速与 fallback"
 authors = ["世界观察日志 <user@example.com>"]
 readme = "README.md"
 packages = [
@@ -11,8 +11,14 @@ packages = [
 [tool.poetry.dependencies]
 python = "^3.11"
 lxml = "^6.0.2"
-zendriver = "^0.15.3"
-httpx = { version = "^0.28.1", extras = ["socks"] }
+# HTTP 指纹层：全栈浏览器指纹（TLS/HTTP2/TCP/头序），实测可通过 wenku8 的
+# Cloudflare Managed Challenge（curl_cffi 不行，见 docs/cf_rate_limit_research.md）
+httpcloak = "^1.7.2"
+# 浏览器兜底层：真实 Chrome 过 CF 质询（懒启动常驻）
+zendriver = "^0.16.0"
+# relay 二进制降级（httpcloak 对小 JPEG 响应有 UTF-8 解码损坏缺陷时，用
+# requests 带同一会话重试原始字节；见 wenku8/sources/api.py:_binary_post）
+requests = ">=2.31"
 
 [tool.poetry.group.dev.dependencies]
 python-dotenv = "^1.2.1"

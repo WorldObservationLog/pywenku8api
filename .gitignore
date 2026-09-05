@@ -162,3 +162,34 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 
+
+# venv & cache
+.venv/
+.venv-eval/
+.test-cache/
+*.har
+
+
+# IDA reverse-engineering temp DBs
+libcpp.so.id*
+*.apk
+
+libcpp.so.i64
+*.i64
+
+# ---- 私有/敏感（不提交）----
+# 研究/开发辅助（本地保留，不纳入版本控制）
+/docs/
+/scripts/
+/tests/
+# 会话抓包与上传区
+*.har
+.dsh-uploads/
+# APK/逆向提取物
+.apk_extract/
+# 反向工程二进制
+libcpp.so*
+*.so
+
+# ����˽�� appver ʵ�֣�������⣩
+wenku8/local_appver_impl.py
