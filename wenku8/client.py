@@ -63,6 +63,11 @@ class Wenku8Client:
         rate_limits = rate_limits or {}
         credentials = credentials or {}
 
+        # 共享全局桶：global_rate 提供时创建并作为跨来源总闸；未提供时
+        # 全局默认不限速（仅来源级限速生效），避免每来源多叠一层默认桶。
+        from wenku8.limiter import _TokenBucket
+        self._global_bucket = _TokenBucket(global_rate or RateLimitConfig.unlimited())
+
         # 缓存层（默认关，开启需显式 cache=True）
         self._cache_enabled = cache
         if cache:
@@ -77,19 +82,22 @@ class Wenku8Client:
         self._add_source(WebSource(proxy=proxies.get(Source.web),
                                    rate_config=rate_limits.get(Source.web),
                                    credentials=credentials.get(Source.web),
-                                   browser=browser, headless=headless))
+                                   browser=browser, headless=headless,
+                                   global_bucket=self._global_bucket))
         self._add_source(ApiRelaySource(endpoint=api_endpoint, appver=api_appver,
                                         appver_provider=appver_provider,
                                         proxy=proxies.get(Source.api),
                                         rate_config=rate_limits.get(Source.api)
                                         or RateLimitConfig.relaxed(),
                                         credentials=credentials.get(Source.api),
-                                        allow_browser_fallback=False))
+                                        allow_browser_fallback=False,
+                                        global_bucket=self._global_bucket))
         if enable_cdn:
             self._add_source(CdnSource(proxy=proxies.get(Source.cdn),
                                        rate_config=rate_limits.get(Source.cdn)
                                        or RateLimitConfig.relaxed(),
-                                       allow_browser_fallback=False))
+                                       allow_browser_fallback=False,
+                                       global_bucket=self._global_bucket))
 
         # 全局熔断协调（把每个来源的 limiter 注册进来）
         self._breaker = ChainCircuitBreaker([s.value for s in self.priority])

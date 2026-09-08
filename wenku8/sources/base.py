@@ -37,7 +37,8 @@ class BaseSource:
                  allow_browser_fallback: bool = True,
                  browser: Optional[BrowserFetcher] = None,
                  credentials: Optional[dict] = None,
-                 label: str = ""):
+                 label: str = "",
+                 global_bucket=None):   # 共享全局桶（跨来源总闸，由 client 注入）
         self.proxy = proxy
         self.rate_config = rate_config or RateLimitConfig.conservative()
         self.headless = headless
@@ -47,7 +48,7 @@ class BaseSource:
         self._profile = FingerprintProfile.for_source(self.source)
         self._limiter = SourceRateLimiter(
             source=self.source.value, source_config=self.rate_config,
-            label=self.label)
+            label=self.label, global_bucket=global_bucket)
         self._browser = browser
         self._fetcher: Optional[Fetcher] = None
         self._session_lock = asyncio.Lock()

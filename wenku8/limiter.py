@@ -98,15 +98,21 @@ class _CircuitState:
 
 
 class SourceRateLimiter:
-    """来源级限速器：全局桶 + 本来源桶 + 退避/熔断状态机。"""
+    """来源级限速器：全局桶（可跨来源共享）+ 本来源桶 + 退避/熔断状态机。
+
+    global_bucket：若传入外部 _TokenBucket 实例（由上层创建、多来源共享），
+    则使用它作为全局总闸；否则按 global_config 自建一个独立全局桶。
+    """
 
     def __init__(self, source: str,
                  global_config: Optional[RateLimitConfig] = None,
                  source_config: Optional[RateLimitConfig] = None,
-                 label: str = ""):
+                 label: str = "",
+                 global_bucket: Optional[_TokenBucket] = None):
         self.source = source
         self.label = label or source
-        self._global_bucket = _TokenBucket(global_config or RateLimitConfig.conservative())
+        self._global_bucket = global_bucket or _TokenBucket(
+            global_config or RateLimitConfig.conservative())
         self._local_bucket = _TokenBucket(source_config or RateLimitConfig.conservative())
         self._circuit = _CircuitState()
         self._recovery_lock = asyncio.Lock()
