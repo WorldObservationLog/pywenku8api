@@ -6,10 +6,12 @@
 - 429/403(封禁) 触发指数退避并把该来源置为「熔断」，冷却到期自动恢复（探测）。
 - 一切等待在 asyncio 中进行；对并发协程安全。
 
-默认参数来自 docs/cf_rate_limit_research.md 的研究结论：
-  HTTP 指纹层对 wenku8 根/登录/书架等非质询路径可 1s 间隔连发（实测 8 连发 200）；
-  深页路径当前出口全部命中 Managed Challenge（非速率所致），故不靠提高 rps 解决，
-  保守起见页面来源默认 1 rps / burst 3，CDN 与 relay 适当放宽。
+默认参数来自 CF 触发率实测（2026-09-06）：
+  - 详情页 articleinfo：1s 间隔连发安全（0% 触发）
+  - reader.php 目录/正文：1s/2s 间隔连续 5-6 次触发限流（50-60%），
+    3s 间隔 6 连发安全（0%）
+  故页面类来源默认 conservative = 0.33rps（≈3s 间隔）/ burst 2，
+  CDN 与 relay（relaxed）可更快。
 """
 from __future__ import annotations
 
@@ -40,8 +42,13 @@ class RateLimitConfig:
     # 常用预置
     @classmethod
     def conservative(cls) -> "RateLimitConfig":
-        """最保守（对所有远程来源的默认）。"""
-        return cls(rps=1.0, burst=3)
+        """最保守（所有远程来源的默认）。
+
+        实测（2026-09-06）：reader.php 路径在 1s/2s 间隔连续 5-6 次即触发
+        Cloudflare 限流；3s 间隔连续 6 次安全。故默认 0.33rps（≈3s 间隔）
+        + burst 2（限制突发），保证 reader 路径不触发。
+        """
+        return cls(rps=0.33, burst=2)
 
     @classmethod
     def relaxed(cls) -> "RateLimitConfig":
