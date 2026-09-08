@@ -41,11 +41,14 @@ class WebSource(BaseSource):
         self.endpoint = endpoint.rstrip("/")
 
     # ---- URL 构造 ----
+    # 语言策略：请求一律简体 GBK（web 服务端 big5 转换会乱码），
+    # 解析后由 lang_convent 转目标语言。
     def _info_url(self, aid: int, lang: Lang) -> str:
-        return f"{self.endpoint}/modules/article/articleinfo.php?id={aid}&charset={lang.charset}"
+        # 保持 lang 参数仅为签名兼容（请求端固定 gbk）
+        return f"{self.endpoint}/modules/article/articleinfo.php?id={aid}&charset=gbk"
 
     def _reader_url(self, aid: int, lang: Lang, cid: Optional[int] = None) -> str:
-        q = f"aid={aid}&charset={lang.charset}"
+        q = f"aid={aid}&charset=gbk"
         if cid is not None:
             q += f"&cid={cid}"
         return f"{self.endpoint}/modules/article/reader.php?{q}"
@@ -60,7 +63,7 @@ class WebSource(BaseSource):
 
     def _toplist_url(self, sort, page: int, lang: Lang) -> str:
         return (f"{self.endpoint}/modules/article/toplist.php?sort={sort}"
-                f"&page={page}&charset={lang.charset}")
+                f"&page={page}&charset=gbk")
 
     def _bookcase_url(self, classid: int = 0) -> str:
         return f"{self.endpoint}/modules/article/bookcase.php?classid={classid}"

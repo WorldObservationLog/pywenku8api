@@ -33,19 +33,11 @@ class LoginValidity(StrEnum):
 
 
 class Lang(StrEnum):
-    """语言/简繁。内部转换为站点参数（charset / t 值）。"""
+    """语言/简繁。仅作输出目标标识；请求端一律简体，
+    由 lang_convent 在本地将简体转换为目标语言。"""
 
     zh_CN = "zh_CN"   # 简体
     zh_TW = "zh_TW"   # 繁体
-
-    @property
-    def charset(self) -> str:
-        return "gbk" if self == Lang.zh_CN else "big5"
-
-    @property
-    def api_t(self) -> int:
-        """API 中继的 t 参数（0=简, 1=繁）。"""
-        return 0 if self == Lang.zh_CN else 1
 
 
 class SearchMethod(StrEnum):
