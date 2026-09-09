@@ -123,8 +123,22 @@ class BrowserFetcher:
                 "Cloudflare 质询在限时内未解决", snippet=html[:2000])
         return html
 
-    async def get_html(self, url: str) -> str:
-        """导航到 url，处理质询，返回渲染后（去 tbody）的 HTML。"""
+    async def get_html(self, url: str, timeout: Optional[float] = None) -> str:
+        """导航到 url，处理质询，返回渲染后（去 tbody）的 HTML。
+
+        有总超时保护：CF Managed Challenge 可能让 tab.get()/verify 长时间
+        挂起（浏览器进程加载/重定向链无可靠内部超时），超过 timeout 抛
+        SourceUnavailableException —— 让上层 fallback 而非无限等待。
+        """
+        timeout = timeout or (self.verify_timeout + 30.0)
+        try:
+            return await asyncio.wait_for(self._get_html_impl(url), timeout=timeout)
+        except asyncio.TimeoutError:
+            from wenku8.exceptions import SourceUnavailableException
+            raise SourceUnavailableException(
+                "browser", f"浏览器兜底超时({timeout:.0f}s): {url}")
+
+    async def _get_html_impl(self, url: str) -> str:
         browser = await self._ensure_browser()
         async with self._nav_lock:
             tab = browser.main_tab
