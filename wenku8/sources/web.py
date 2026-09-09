@@ -69,19 +69,21 @@ class WebSource(BaseSource):
         return f"{self.endpoint}/modules/article/bookcase.php?classid={classid}"
 
     # ---- 数据获取 ----
+    # 语言策略：请求一律简体(GBK)。fetch 层只返回简体原文，简繁转换由
+    # Wenku8Client 门面统一做（见 client.get_*）——缓存因此可按简体共享。
     async def fetch_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
         fetcher = await self._ensure_fetcher()
         url = self._info_url(aid, lang)
         html = await self._page(fetcher, url)
         info = html_common.parse_novel_info(html, aid, url=url)
-        return lang_convent(info, lang)
+        return info
 
     async def fetch_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
         fetcher = await self._ensure_fetcher()
         url = self._reader_url(aid, lang)
         html = await self._page(fetcher, url)
         index = html_common.parse_novel_index(html, aid, url=url)
-        return lang_convent(index, lang)
+        return index
 
     async def fetch_novel_content(self, aid: int, cid: int,
                                   lang: Lang = Lang.zh_CN) -> NovelContent:
@@ -90,7 +92,7 @@ class WebSource(BaseSource):
         html = await self._page(fetcher, url)
         content = html_common.parse_novel_content(html, aid, cid, url=url)
         content.source = self.source.value
-        return lang_convent(content, lang)
+        return content
 
     async def fetch_search(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
@@ -127,7 +129,7 @@ class WebSource(BaseSource):
                 sr.page_control = PageControl(now=1, end=1)
                 return sr
         result = html_common.parse_search_result(html, url=url)
-        return lang_convent(result, lang)
+        return result
 
     async def _search_gate(self) -> None:
         """保证两次搜索间隔 >= 5 秒（站点硬限制）。"""
@@ -146,7 +148,7 @@ class WebSource(BaseSource):
         url = self._toplist_url(sort, page, lang)
         html = await self._page(fetcher, url)
         result = html_common.parse_search_result(html, url=url)
-        return lang_convent(result, lang)
+        return result
 
     async def fetch_bookshelf(self, classid: int = 0,
                               lang: Lang = Lang.zh_CN) -> list[Book]:
@@ -154,7 +156,7 @@ class WebSource(BaseSource):
         url = self._bookcase_url(classid)
         html = await self._page(fetcher, url)
         books = html_common.parse_bookshelf(html, url=url)
-        return lang_convent(books, lang)
+        return books
 
     async def _page(self, fetcher, url: str) -> str:
         """GET 页面并统一解码（站点为 GBK，浏览器渲染层为 UTF-8）。"""

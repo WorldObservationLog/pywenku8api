@@ -35,7 +35,6 @@ from wenku8.models import (
     SearchResult, Volume,
 )
 from wenku8.sources.base import BaseSource
-from wenku8.utils import lang_convent
 
 RELAY_ENDPOINT = "https://wenku8-relay.mewx.org/"
 
@@ -200,15 +199,16 @@ class ApiRelaySource(BaseSource):
         return body.decode("utf-8", "replace")
 
     # ---- 数据获取 ----
-    # 语言策略：请求一律简体(t=0)，返回后由 lang_convent 转换目标语言
-    # （不依赖 relay 的 t=1 繁体，避免服务端简繁转换乱码）
+    # ---- 数据获取 ----
+    # 语言策略：请求一律简体(t=0)。fetch 层只返回简体原文，简繁转换由
+    # Wenku8Client 门面统一做（见 client.get_*）——缓存因此可按简体共享。
     async def fetch_novel_intro(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
-        """获取完整简介纯文本（action=book&do=intro）。"""
+        """获取完整简介纯文本（简体，action=book&do=intro）。"""
         resp = await self._post(f"action=book&do=intro&aid={aid}&t=0")
-        return lang_convent(self._decode_xml_text(resp.body).strip(), lang)
+        return self._decode_xml_text(resp.body).strip()
 
     async def fetch_novel_info(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
-        """meta（完整元数据）+ intro（简介）两次请求合成 NovelInfo。"""
+        """meta（完整元数据）+ intro（简介）两次请求合成 NovelInfo（简体）。"""
         meta_resp = await self._post(f"action=book&do=meta&aid={aid}&t=0")
         meta_text = self._decode_xml_text(meta_resp.body)
         info = self._parse_meta(meta_text, aid)
@@ -217,12 +217,12 @@ class ApiRelaySource(BaseSource):
                 info.intro = await self.fetch_novel_intro(aid, lang=lang)
             except Exception:
                 pass  # intro 缺失不致命
-        return lang_convent(info, lang)
+        return info
 
     async def fetch_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
         resp = await self._post(f"action=book&do=list&aid={aid}&t=0")
         xml = self._decode_xml_text(resp.body)
-        return lang_convent(self._parse_index(xml, aid), lang)
+        return self._parse_index(xml, aid)
 
     async def fetch_novel_content(self, aid: int, cid: int,
                                   lang: Lang = Lang.zh_CN) -> NovelContent:
@@ -246,7 +246,7 @@ class ApiRelaySource(BaseSource):
         content = NovelContent(aid=aid, cid=cid, title=title,
                                text="\n".join(out).strip(),
                                images=images, source=self.source.value)
-        return lang_convent(content, lang)
+        return content
 
     async def fetch_search(self, keyword: str, method: SearchMethod,
                            page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
@@ -258,10 +258,9 @@ class ApiRelaySource(BaseSource):
         text = self._decode_xml_text(resp.body).lstrip()
         if text.startswith("<result>"):
             page_end, items = self._parse_search_result_xml(text)
-            return lang_convent(
-                SearchResult(results=items,
-                             page_control=PageControl(now=1, end=page_end or 1)), lang)
-        # 兜底：仅 aid 列表 → 逐本富化（上限保护；fetch_novel_info 已按 lang 转换）
+            return SearchResult(results=items,
+                                page_control=PageControl(now=1, end=page_end or 1))
+        # 兜底：仅 aid 列表 → 逐本富化（上限保护；fetch_novel_info 返回简体原文）
         aids = self._parse_aid_list(text)
         items = []
         for i, aid in enumerate(aids[:self.MAX_SEARCH_ENRICH]):
@@ -335,14 +334,12 @@ class ApiRelaySource(BaseSource):
             text = self._decode_xml_text(resp.body).lstrip()
             if text.startswith("{"):
                 page_end, items = self._parse_novellist_json(text)
-                return lang_convent(SearchResult(results=items,
-                                                 page_control=PageControl(now=page, end=page_end)),
-                                    lang)
+                return SearchResult(results=items,
+                             page_control=PageControl(now=page, end=page_end))
             if text.startswith("<"):
                 page_end, items = self._parse_novellist_xml(text)
-                return lang_convent(SearchResult(results=items,
-                                                 page_control=PageControl(now=page, end=page_end)),
-                                    lang)
+                return SearchResult(results=items,
+                             page_control=PageControl(now=page, end=page_end))
         except Exception:
             pass
         # 旧版回退
@@ -355,16 +352,15 @@ class ApiRelaySource(BaseSource):
         else:
             raise PageParseError("novellist 响应无法识别", page=text,
                                  url=self.endpoint, source=self.source.value)
-        return lang_convent(SearchResult(results=items,
-                                         page_control=PageControl(now=page, end=page_end)),
-                            lang)
+        return SearchResult(results=items,
+                             page_control=PageControl(now=page, end=page_end))
 
     async def fetch_bookshelf(self, lang: Lang = Lang.zh_CN) -> list[Book]:
         if not self.is_logged_in:
             return []
         resp = await self._post(f"action=bookcase&t=0")
         xml = self._decode_xml_text(resp.body)
-        return lang_convent(self._parse_bookshelf(xml), lang)
+        return self._parse_bookshelf(xml)
 
     # ---- 写操作（需登录；服务端返回纯数字码，1=成功） ----
     async def bookshelf_add(self, aid: int) -> int:
@@ -453,7 +449,7 @@ class ApiRelaySource(BaseSource):
         返回 NovelInfo（标题/作者/状态/更新 已填，统计字段为空）。"""
         resp = await self._post(f"action=book&do=bookinfo&aid={aid}&t=0")
         xml = self._decode_xml_text(resp.body)
-        return lang_convent(self._parse_meta(xml, aid), lang)
+        return self._parse_meta(xml, aid)
 
     async def _binary_post(self, cmd: str) -> bytes:
         """POST 并校验 JPEG 二进制。httpcloak 存在对小 JPEG 响应做 UTF-8 解码

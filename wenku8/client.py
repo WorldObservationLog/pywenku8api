@@ -33,6 +33,7 @@ from wenku8.sources.api import ApiRelaySource
 from wenku8.sources.base import BaseSource
 from wenku8.sources.cdn import CdnSource
 from wenku8.sources.web import WebSource
+from wenku8.utils import lang_convent
 
 DEFAULT_PRIORITY = (Source.web, Source.api)
 
@@ -234,19 +235,30 @@ class Wenku8Client:
 
     # ---- 读操作 ----
     async def _cached_call(self, method: str, coro_factory, args: tuple = (),
-                           kwargs: Optional[dict] = None, use_cache: Optional[bool] = None):
-        """若缓存启用则先查缓存；未命中执行 coro_factory 并回填。"""
+                           kwargs: Optional[dict] = None, use_cache: Optional[bool] = None,
+                           lang: Optional[Lang] = None):
+        """若缓存启用则先查缓存；未命中执行 coro_factory 并回填。
+
+        缓存语义：数据一律以简体存储（fetch 层只返回简体原文），缓存键
+        忽略 lang —— zh_CN/zh_TW 共享同一份简体缓存；lang 非简体时在
+        返回前经 lang_convent 本地转繁。
+        """
         if use_cache is None:
             use_cache = self._cache_enabled
         cache = self._cache if use_cache else None
         if cache is None:
-            return await coro_factory()
-        hit = await cache.get(method, args, kwargs)
+            val = await coro_factory()
+            return lang_convent(val, lang) if lang is not None else val
+        # 缓存键：lang 值归一化为 zh_CN（数据存简体，各 lang 共享键）
+        zh_CN = Lang.zh_CN.value
+        norm_args = tuple(zh_CN if v == lang.value else v
+                          for v in args) if lang is not None else args
+        hit = await cache.get(method, norm_args, kwargs)
         if hit is not None:
-            return hit
+            return lang_convent(hit, lang) if lang is not None else hit
         val = await coro_factory()
-        await cache.set(method, val, args, kwargs)
-        return val
+        await cache.set(method, val, norm_args, kwargs)
+        return lang_convent(val, lang) if lang is not None else val
 
     async def _copyright_fallback(self, method_name: str, result,
                                   source, *args):
@@ -281,7 +293,7 @@ class Wenku8Client:
         return await self._cached_call(
             "fetch_novel_info", _impl,
             (aid, source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     async def get_novel_intro(self, aid: int, source: Optional[Source | str] = None,
                               lang: Optional[Lang] = None,
@@ -296,7 +308,7 @@ class Wenku8Client:
             "fetch_novel_intro",
             lambda: self._intro_impl(aid, source, lang),
             (aid, source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     async def _intro_impl(self, aid: int, source, lang: Lang) -> str:
         """取简介：source 指定则用该源；默认 web → 沿链。"""
@@ -343,7 +355,7 @@ class Wenku8Client:
         return await self._cached_call(
             "fetch_novel_index", _impl,
             (aid, source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     async def get_novel_content(self, aid: int, cid: int,
                                 source: Optional[Source | str] = None,
@@ -361,16 +373,19 @@ class Wenku8Client:
         return await self._cached_call(
             "fetch_novel_content", _impl,
             (aid, cid, source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     async def get_full_novel_content(self, aid: int,
                                      source: Optional[Source | str] = None,
                                      lang: Optional[Lang] = None) -> str:
         """整本 TXT。默认走 CDN 源（若启用），否则沿业务链的 NOVEL_FULL。"""
+        lang = lang or self.default_lang
         if self.cdn is not None and source is None:
-            return await self.cdn.fetch_full_novel_content(aid, lang or self.default_lang)
-        return await self._try_chain(Capability.NOVEL_FULL, "fetch_novel_full",
-                                     source, aid, lang or self.default_lang)
+            content = await self.cdn.fetch_full_novel_content(aid, lang)
+        else:
+            content = await self._try_chain(Capability.NOVEL_FULL, "fetch_novel_full",
+                                            source, aid, lang)
+        return lang_convent(content, lang) if isinstance(content, str) else content
 
     async def get_novel_cover(self, aid: int,
                               source: Optional[Source | str] = None) -> bytes:
@@ -417,7 +432,7 @@ class Wenku8Client:
             lambda: self._try_chain(Capability.NOVEL_INFO, "fetch_novel_bookinfo",
                                     source, aid, lang),
             (aid, source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     async def search_novel(self, keyword: str, method: SearchMethod = SearchMethod.NAME,
                            page: int = 1, source: Optional[Source | str] = None,
@@ -430,7 +445,7 @@ class Wenku8Client:
                                     source, keyword, method, page, lang),
             (keyword, method.value, page,
              source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     async def search_novel_by_name(self, keyword: str, page: int = 1,
                                    source: Optional[Source | str] = None,
@@ -452,7 +467,7 @@ class Wenku8Client:
             lambda: self._try_chain(Capability.NOVEL_LIST, "fetch_novel_list",
                                     source, sort, page, lang),
             (sort, page, source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     async def get_bookshelf(self, source: Optional[Source | str] = None,
                             lang: Optional[Lang] = None,
@@ -463,7 +478,7 @@ class Wenku8Client:
             lambda: self._try_chain(Capability.BOOKSHELF, "fetch_bookshelf",
                                     source, lang),
             (source.value if isinstance(source, Source) else source, lang.value),
-            None, use_cache)
+            None, use_cache, lang=lang)
 
     # ---- 写操作（书架增删/推荐）----
     # 写操作目前仅 api(relay) 源实现；web 网页版写操作未实现（表单 CSRF 等），

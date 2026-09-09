@@ -28,7 +28,7 @@ class CdnSource(BaseSource):
 
     def __init__(self, img_endpoint: str = IMG_ENDPOINT,
                  dl_endpoints: tuple[str, ...] = DL_ENDPOINTS,
-                 full_txt_ttl: float = 30 * 60, **kwargs):
+                 full_txt_ttl: float = 24 * 3600, **kwargs):
         # CDN 静态资源不需要浏览器兜底
         kwargs.setdefault("allow_browser_fallback", False)
         # 主限速器服务封面/图片（img.wenku8.com 小文件）：默认 image()；
@@ -45,9 +45,29 @@ class CdnSource(BaseSource):
             source=self.source.value,
             source_config=full_rate or RateLimitConfig.full_dl(),
             label=f"{self.source.value}:full_dl")
-        # (aid, lang) -> (expire_monotonic, content)
-        self._full_cache: dict[tuple[int, Lang], tuple[float, str]] = {}
+        # aid -> (expire_monotonic, 简体content)；键不含 lang（共享）
+        self._full_cache: dict[int, tuple[float, str]] = {}
         self._full_txt_ttl = full_txt_ttl
+        # 封面/图片字节缓存（24h；封面基本不变，重复请求免网络）
+        self._image_cache: dict[str, tuple[float, bytes]] = {}
+        self._image_ttl = 24 * 3600
+
+    def _image_get(self, key: str) -> Optional[bytes]:
+        import time as _t
+        hit = self._image_cache.get(key)
+        if hit and hit[0] > _t.monotonic():
+            return hit[1]
+        self._image_cache.pop(key, None)
+        return None
+
+    def _image_set(self, key: str, data: bytes) -> None:
+        import time as _t
+        now = _t.monotonic()
+        self._image_cache[key] = (now + self._image_ttl, data)
+        # 惰性清理过期项（防无限增长）
+        if len(self._image_cache) > 10000:
+            for k in [k for k, (exp, _) in self._image_cache.items() if exp <= now]:
+                del self._image_cache[k]
 
     # ---- 能力 ----
     @property
@@ -60,20 +80,29 @@ class CdnSource(BaseSource):
         return f"{self.img_endpoint}/image/{aid // 1000}/{aid}/{aid}s.jpg"
 
     async def fetch_novel_cover(self, aid: int) -> bytes:
+        key = self.cover_url(aid)
+        cached = self._image_get(key)
+        if cached is not None:
+            return cached
         fetcher = await self._ensure_fetcher()
         # no_cache: 同一会话重复取封面时避免 304（httpcloak 条件缓存）
-        resp = await fetcher.get(self.cover_url(aid), no_cache=True)
+        resp = await fetcher.get(key, no_cache=True)
         if resp.status_code != 200 or not resp.body:
             raise PageParseError(f"封面下载失败 status={resp.status_code}",
-                                 url=self.cover_url(aid), source=self.source.value)
+                                 url=key, source=self.source.value)
+        self._image_set(key, resp.body)
         return resp.body
 
     async def get_picture(self, url: str) -> bytes:
+        cached = self._image_get(url)
+        if cached is not None:
+            return cached
         fetcher = await self._ensure_fetcher()
         resp = await fetcher.get(url, no_cache=True)
         if resp.status_code != 200 or not resp.body:
             raise PageParseError(f"图片下载失败 status={resp.status_code}",
                                  url=url, source=self.source.value)
+        self._image_set(url, resp.body)
         return resp.body
 
     # ---- 整本 TXT ----
@@ -83,10 +112,11 @@ class CdnSource(BaseSource):
 
     async def fetch_full_novel_content(self, aid: int,
                                        lang: Lang = Lang.zh_CN) -> str:
-        """整本下载：节点逐一尝试，失败切下一个；结果短时缓存。"""
+        """整本下载：节点逐一尝试，失败切下一个；简体结果短时缓存
+        （键不含 lang —— zh_CN/zh_TW 共享同一份简体，转换在门面做）。"""
         import time
         now = time.monotonic()
-        hit = self._full_cache.get((aid, lang))
+        hit = self._full_cache.get(aid)
         if hit and hit[0] > now:
             return hit[1]
 
@@ -108,8 +138,8 @@ class CdnSource(BaseSource):
                     last_err = PageParseError(f"整本下载 HTTP {resp.status_code}",
                                               url=url, source=self.source.value)
                     continue
-                content = lang_convent(resp.body.decode("utf-8", "replace"), lang)
-                self._full_cache[(aid, lang)] = (now + self._full_txt_ttl, content)
+                content = resp.body.decode("utf-8", "replace")  # 简体原文
+                self._full_cache[aid] = (now + self._full_txt_ttl, content)
                 # 惰性清理过期缓存
                 for k in [k for k, (exp, _) in self._full_cache.items() if exp <= now]:
                     del self._full_cache[k]
