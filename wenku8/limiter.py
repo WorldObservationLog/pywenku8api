@@ -63,6 +63,14 @@ class RateLimitConfig:
     def unlimited(cls) -> "RateLimitConfig":
         return cls(rps=-1.0, burst=1 << 30, enabled=False)
 
+    @classmethod
+    def full_dl(cls) -> "RateLimitConfig":
+        """整本 TXT 下载专用（实测 CDN 连续 4-5 本大文件触发 429）。
+
+        0.25rps ≈ 4s/本 + burst 2，避开短窗内多本连续下载。
+        """
+        return cls(rps=0.25, burst=2)
+
 
 class _TokenBucket:
     """单桶：asyncio 安全的令牌桶。"""

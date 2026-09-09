@@ -30,9 +30,17 @@ class CdnSource(BaseSource):
                  full_txt_ttl: float = 30 * 60, **kwargs):
         # CDN 静态资源不需要浏览器兜底
         kwargs.setdefault("allow_browser_fallback", False)
+        full_rate = kwargs.pop("full_rate", None)  # 整本下载专用限速
         super().__init__(**kwargs)
         self.img_endpoint = img_endpoint.rstrip("/")
         self.dl_endpoints = dl_endpoints
+        # 整本下载独立限速器：封面/图片走来源 limiter(relaxed)；
+        # 整本大文件按 full_rate 慢速（实测连续 4-5 本会触发 CDN 429）
+        from wenku8.limiter import RateLimitConfig, SourceRateLimiter
+        self._full_limiter = SourceRateLimiter(
+            source=self.source.value,
+            source_config=full_rate or RateLimitConfig.full_dl(),
+            label=f"{self.source.value}:full_dl")
         # (aid, lang) -> (expire_monotonic, content)
         self._full_cache: dict[tuple[int, Lang], tuple[float, str]] = {}
         self._full_txt_ttl = full_txt_ttl
@@ -78,12 +86,16 @@ class CdnSource(BaseSource):
         if hit and hit[0] > now:
             return hit[1]
 
+        # 整本大文件走专用慢速闸（避开 CDN 短窗多本 429）
+        await self._full_limiter.wait_ready()
+
         fetcher = await self._ensure_fetcher()
         last_err: Optional[Exception] = None
         for node in self.dl_endpoints:
             url = self.full_txt_url(node, aid)
             try:
-                resp = await fetcher.get(url)
+                # no_cache：同一会话重复下载同一本时避免 httpcloak 304 空体
+                resp = await fetcher.get(url, no_cache=True)
                 if resp.status_code == 429:
                     last_err = PageParseError(f"整本下载 429", url=url,
                                               source=self.source.value)
