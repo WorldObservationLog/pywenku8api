@@ -15,6 +15,7 @@ from typing import Optional
 
 from wenku8.consts import Capability, Lang, Source
 from wenku8.exceptions import PageParseError
+from wenku8.limiter import RateLimitConfig, SourceRateLimiter
 from wenku8.sources.base import BaseSource
 from wenku8.utils import lang_convent
 
@@ -30,13 +31,16 @@ class CdnSource(BaseSource):
                  full_txt_ttl: float = 30 * 60, **kwargs):
         # CDN 静态资源不需要浏览器兜底
         kwargs.setdefault("allow_browser_fallback", False)
+        # 主限速器服务封面/图片（img.wenku8.com 小文件）：默认 image()；
+        # caller 显式传 rate_config 时尊重传入值（含显式 None → 用 image()）。
+        rate_config = kwargs.pop("rate_config", None)
+        kwargs["rate_config"] = rate_config or RateLimitConfig.image()
         full_rate = kwargs.pop("full_rate", None)  # 整本下载专用限速
         super().__init__(**kwargs)
         self.img_endpoint = img_endpoint.rstrip("/")
         self.dl_endpoints = dl_endpoints
-        # 整本下载独立限速器：封面/图片走来源 limiter(relaxed)；
+        # 整本下载独立限速器：封面/图片走来源 limiter(image, 8rps)；
         # 整本大文件按 full_rate 慢速（实测连续 4-5 本会触发 CDN 429）
-        from wenku8.limiter import RateLimitConfig, SourceRateLimiter
         self._full_limiter = SourceRateLimiter(
             source=self.source.value,
             source_config=full_rate or RateLimitConfig.full_dl(),

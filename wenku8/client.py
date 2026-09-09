@@ -94,8 +94,7 @@ class Wenku8Client:
                                         global_bucket=self._global_bucket))
         if enable_cdn:
             self._add_source(CdnSource(proxy=proxies.get(Source.cdn),
-                                       rate_config=rate_limits.get(Source.cdn)
-                                       or RateLimitConfig.relaxed(),
+                                       rate_config=rate_limits.get(Source.cdn),
                                        allow_browser_fallback=False,
                                        global_bucket=self._global_bucket))
 

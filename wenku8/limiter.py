@@ -71,6 +71,15 @@ class RateLimitConfig:
         """
         return cls(rps=0.25, burst=2)
 
+    @classmethod
+    def image(cls) -> "RateLimitConfig":
+        """图片 CDN 专用（img.wenku8.com 封面/插图小文件）。
+
+        实测 0.2s 间隔（5rps）20 连发无触发，阈值远高于此；
+        放宽到 8rps/burst 16 减少封面批量下载排队。
+        """
+        return cls(rps=8.0, burst=16)
+
 
 class _TokenBucket:
     """单桶：asyncio 安全的令牌桶。"""
