@@ -126,21 +126,35 @@ class BrowserFetcher:
     async def get_html(self, url: str, timeout: Optional[float] = None) -> str:
         """导航到 url，处理质询，返回渲染后（去 tbody）的 HTML。
 
-        有总超时保护：CF Managed Challenge 可能让 tab.get()/verify 长时间
-        挂起（浏览器进程加载/重定向链无可靠内部超时），超过 timeout 抛
-        SourceUnavailableException —— 让上层 fallback 而非无限等待。
+        超时/内部异常后**必须丢弃浏览器实例**：实测（2026-09）用
+        asyncio.wait_for 取消挂起的 tab.get() 虽能返回，但会令 zendriver 的
+        Listener.listener_loop 抛 InvalidStateError 而死亡，该实例内所有
+        后续导航永久挂起（常驻复用 → 等于永久卡死）。故超时后重置浏览器，
+        由下次请求重建；异常统一转 SourceUnavailableException 供上层 fallback。
         """
         timeout = timeout or (self.verify_timeout + 30.0)
         try:
             return await asyncio.wait_for(self._get_html_impl(url), timeout=timeout)
         except asyncio.TimeoutError:
+            await self._reset_browser()
             from wenku8.exceptions import SourceUnavailableException
             raise SourceUnavailableException(
                 "browser", f"浏览器兜底超时({timeout:.0f}s): {url}")
+        except asyncio.CancelledError:
+            raise
+        except (RateLimitException, CloudflareChallengeException):
+            raise  # 业务语义的过盾失败：浏览器实例本身仍健康，不重置
+        except Exception as e:  # zendriver 内部错误 → 状态可能已损坏
+            await self._reset_browser()
+            from wenku8.exceptions import SourceUnavailableException
+            raise SourceUnavailableException(
+                "browser", f"浏览器通道异常: {type(e).__name__}: {e}")
 
     async def _get_html_impl(self, url: str) -> str:
-        browser = await self._ensure_browser()
+        # 先取导航锁再取浏览器实例：保证拿到的始终是"当前"实例，
+        # 避免重置把实例摘掉后旧引用仍被使用（会挂在被 stop 的浏览器上）。
         async with self._nav_lock:
+            browser = await self._ensure_browser()
             tab = browser.main_tab
             await tab.get(url)
             html = strip_tbody(await self._wait_cf(tab))
@@ -150,12 +164,36 @@ class BrowserFetcher:
                 raise CloudflareChallengeException("未解决的质询残留页", url=url, snippet=html[:2000])
             return html
 
+    async def _reset_browser(self) -> None:
+        """丢弃当前浏览器实例：先抢占导航锁（确保没有在途导航），再摘引用，
+        最后限时 stop() —— stop 自身可能因连接损坏挂起，超时则强杀进程兜底。"""
+        got_nav = False
+        try:
+            await asyncio.wait_for(self._nav_lock.acquire(), timeout=5.0)
+            got_nav = True
+        except Exception:
+            got_nav = False  # 僵尸导航仍持锁：仍要摘引用/杀进程
+        try:
+            async with self._browser_lock:
+                browser = self._browser
+                self._browser = None
+        finally:
+            if got_nav:
+                self._nav_lock.release()
+        if browser is None:
+            return
+        try:
+            await asyncio.wait_for(browser.stop(), timeout=8.0)
+        except Exception:
+            try:  # stop 挂起/失败 → 直接强杀子进程
+                proc = getattr(browser, "_process", None)
+                if proc is not None and proc.returncode is None:
+                    proc.kill()
+            except Exception:
+                pass
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        if self._browser is not None:
-            try:
-                await self._browser.stop()
-            finally:
-                self._browser = None
+        await self._reset_browser()
