@@ -31,9 +31,11 @@ from urllib.parse import quote, urlencode
 from wenku8.consts import Capability, Lang, SearchMethod, Source
 from wenku8.exceptions import (
     LoginErrorException, NotLoggedInException, OperationFailedException, PageParseError,
+    SourceUnavailableException,
 )
 from wenku8.models import (
-    Book, NovelContent, NovelIndex, NovelInfo, ReviewDetail, ReviewPage, SearchResult,
+    Book, LibraryCategory, NovelContent, NovelIndex, NovelInfo, ReviewDetail, ReviewPage,
+    SearchResult, UserInfo,
 )
 from wenku8.parsers import html_common
 from wenku8.sources.base import BaseSource
@@ -102,6 +104,10 @@ class WebSource(BaseSource):
 
     async def fetch_novel_bookinfo(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
         """列表项信息。网页版无轻量接口，退回完整详情页解析（字段更全）。"""
+        return await self.fetch_novel_info(aid, lang)
+
+    async def fetch_novel_shortinfo(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
+        """短信息。网页版无对应精简接口，退回完整详情页解析。"""
         return await self.fetch_novel_info(aid, lang)
 
     async def fetch_novel_cover(self, aid: int) -> bytes:
@@ -185,6 +191,23 @@ class WebSource(BaseSource):
         html = await self._page(fetcher, url)
         result = html_common.parse_search_result(html, url=url)
         return result
+
+    # ---- 文库分类与按文库列表 ----
+    async def fetch_library_list(self, lang: Lang = Lang.zh_CN) -> list[LibraryCategory]:
+        """文库分类：从轻小说列表页的分类阅读链接提取。"""
+        fetcher = await self._ensure_fetcher()
+        url = f"{self.endpoint}/modules/article/articlelist.php"
+        html = await self._page(fetcher, url)
+        return html_common.parse_library_list(html, url=url)
+
+    async def fetch_novel_list_by_library(self, sort_id: int, page: int = 1,
+                                          lang: Lang = Lang.zh_CN) -> SearchResult:
+        """按文库分类列出小说（articlelist.php?class={sort_id}&page={page}）。"""
+        fetcher = await self._ensure_fetcher()
+        url = (f"{self.endpoint}/modules/article/articlelist.php"
+               f"?class={sort_id}&page={page}")
+        html = await self._page(fetcher, url)
+        return html_common.parse_novel_card_list(html, url=url)
 
     async def fetch_bookshelf(self, classid: int = 0,
                               lang: Lang = Lang.zh_CN) -> list[Book]:
@@ -335,7 +358,9 @@ class WebSource(BaseSource):
     # ---- 登录 ----
     @property
     def is_logged_in(self) -> bool:
-        return bool(self._cookies.get("phpsessid"))
+        # 登录成功后服务端下发 jieqiuserinfo；匿名会话只有 phpsessid，
+        # 故以 jieqiuserinfo 判定，避免把“访问过登录页”误判为已登录。
+        return bool(self._cookies.get("jieqiuserinfo"))
 
     async def _sync_cookies(self) -> None:
         fetcher = await self._ensure_fetcher()
@@ -366,13 +391,29 @@ class WebSource(BaseSource):
             referer=f"{self.endpoint}/login.php?do=submit",
         )
         await self._sync_cookies()
-        # 登录成功与否：PHPSESSID 一定下发；再校验书架可达性过于昂贵，依赖 cookie
-        # 判断（旧实现仅用 phpsessid 判定）。
-        ok = bool(self._cookies.get("phpsessid"))
-        if not ok:
-            raise LoginErrorException("Web 登录失败（未获得会话 cookie）",
+        # 成功判定：服务端在登录成功后下发 jieqiuserinfo（匿名会话仅有
+        # phpsessid），故不能只看 phpsessid，否则失败也会被判成功。
+        if not self._cookies.get("jieqiuserinfo"):
+            raise LoginErrorException("Web 登录失败（用户名/邮箱或密码不正确）",
                                       source=self.source.value)
         return True
+
+    async def login_email(self, email: str, password: str) -> bool:
+        """邮箱登录：网页登录表单的用户名字段同时接受邮箱，故复用 login。"""
+        return await self.login(email, password)
+
+    async def fetch_user_info(self, lang: Lang = Lang.zh_CN) -> UserInfo:
+        """当前登录用户信息（用户面板 /userdetail.php）。"""
+        self._require_login("获取用户信息")
+        fetcher = await self._ensure_fetcher()
+        url = f"{self.endpoint}/userdetail.php"
+        html = await self._page(fetcher, url)
+        return html_common.parse_user_info(html, url=url)
+
+    async def user_sign(self) -> int:
+        """每日签到：网页版无对应入口，明确不支持（仅 api 来源提供）。"""
+        raise SourceUnavailableException(
+            self.source.value, "网页版无签到功能（请使用 api 来源）")
 
     async def logout(self) -> None:
         """登出：请求 /logout.php 销毁服务端会话，再清本地 cookie。"""

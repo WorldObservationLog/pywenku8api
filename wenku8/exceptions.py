@@ -91,3 +91,15 @@ class OperationFailedException(Wenku8Error):
         self.code = code
         self.source = source
         super().__init__(f"{message} (code={code}, source={source})")
+
+
+class ContentValidationException(Wenku8Error):
+    """提交内容未通过本地校验（过短 / 命中不宜词）。
+
+    hit: 命中的不宜词（过短时为空）。
+    """
+
+    def __init__(self, message: str, hit: str = "", reason: str = ""):
+        self.hit = hit
+        self.reason = reason
+        super().__init__(message)

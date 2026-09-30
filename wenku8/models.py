@@ -180,6 +180,26 @@ class ReviewDetail:
 
 
 @dataclass
+class LibraryCategory:
+    """文库分类（API action=xml&item=sort；Web 对应文库分类页）。"""
+
+    sort_id: int = 0
+    name: str = ""
+
+
+@dataclass
+class UserInfo:
+    """当前登录用户信息（API action=userinfo；Web 用户资料页）。"""
+
+    uid: int = 0
+    username: str = ""
+    nickname: str = ""
+    score: int = 0              # 积分
+    experience: int = 0         # 经验
+    rank: str = ""              # 等级称号
+
+
+@dataclass
 class Book:
     """书架条目。"""
 

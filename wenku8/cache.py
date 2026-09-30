@@ -32,6 +32,10 @@ _DEFAULT_TTL: dict[str, float] = {
     "fetch_bookshelf_ids": 2 * 60,
     "fetch_reviews": 10 * 60,
     "fetch_review_detail": 10 * 60,
+    "fetch_novel_shortinfo": 30 * 60,
+    "fetch_library_list": 60 * 60,
+    "fetch_novel_list_by_library": 10 * 60,
+    "fetch_user_info": 60,
 }
 
 

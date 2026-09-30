@@ -19,6 +19,7 @@ Cloudflare 质询，但需遵守其自身限速（本项目按宽松但非无限
 from __future__ import annotations
 
 import base64
+import re
 import time
 from typing import Optional
 from urllib.parse import quote
@@ -31,8 +32,9 @@ from wenku8.exceptions import (
 )
 from wenku8.fetcher.http import HttpResponse
 from wenku8.models import (
-    Book, Chapter, NovelContent, NovelIndex, NovelInfo, PageControl, Review, ReviewDetail,
-    ReviewPage, ReviewReply, SearchItem, SearchResult, Volume,
+    Book, Chapter, LibraryCategory, NovelContent, NovelIndex, NovelInfo, PageControl,
+    Review, ReviewDetail, ReviewPage, ReviewReply, SearchItem, SearchResult, UserInfo,
+    Volume,
 )
 from wenku8.sources.base import BaseSource
 
@@ -523,6 +525,88 @@ class ApiRelaySource(BaseSource):
         xml = self._decode_xml_text(resp.body)
         return self._parse_meta(xml, aid)
 
+    async def fetch_novel_shortinfo(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
+        """短信息（action=book&do=info）：比 bookinfo 更精简的条目信息。"""
+        resp = await self._post(f"action=book&do=info&aid={aid}&t=0")
+        return self._parse_shortinfo(self._decode_xml_text(resp.body), aid)
+
+    # ---- 文库分类与按文库列表 ----
+    async def fetch_library_list(self, lang: Lang = Lang.zh_CN) -> list[LibraryCategory]:
+        """文库分类列表（action=xml&item=sort）：sort_id → 文库名。"""
+        resp = await self._post("action=xml&item=sort&t=0")
+        return self._parse_library_list(self._decode_xml_text(resp.body))
+
+    async def fetch_novel_list_by_library(self, sort_id: int, page: int = 1,
+                                          lang: Lang = Lang.zh_CN) -> SearchResult:
+        """按文库分类列出小说（action=novellist&sort={sort_id}）。
+
+        sort_id 取自 fetch_library_list；列表带完整信息（XML 或 JSON）。
+        """
+        resp = await self._post(f"action=novellist&sort={sort_id}&page={page}&t=0")
+        text = self._decode_xml_text(resp.body).lstrip()
+        if text.startswith("{"):
+            page_end, items = self._parse_novellist_json(text)
+        elif text.startswith("<"):
+            page_end, items = self._parse_novellist_xml(text)
+        else:
+            raise PageParseError("按文库列表响应无法识别", page=text,
+                                 url=self.endpoint, source=self.source.value)
+        return SearchResult(results=items,
+                            page_control=PageControl(now=page, end=page_end or 1))
+
+    # ---- 用户信息与签到 ----
+    async def fetch_user_info(self, lang: Lang = Lang.zh_CN) -> UserInfo:
+        """当前登录用户信息（action=userinfo）。"""
+        if not self.is_logged_in:
+            from wenku8.exceptions import NotLoggedInException
+            raise NotLoggedInException("获取用户信息需先登录 (api)")
+        resp = await self._post("action=userinfo")
+        return self._parse_user_info(self._decode_xml_text(resp.body))
+
+    async def login_email(self, email: str, password: str) -> bool:
+        """邮箱登录（action=loginemail）。"""
+        u = quote(email, safe="", encoding="utf-8")
+        p = quote(password, safe="", encoding="utf-8")
+        resp = await self._post(f"action=loginemail&username={u}&password={p}")
+        body = self._decode_xml_text(resp.body).strip()
+        if body == "1":
+            return True
+        code = int(body) if body.isdigit() else None
+        raise LoginErrorException("relay 邮箱登录失败", code=code,
+                                  source=self.source.value)
+
+    async def user_sign(self) -> int:
+        """每日签到（action=block&do=sign）。返回 1=成功。
+
+        服务端返回形如 _cb({"ret":0})；ret=0 视为成功。
+        """
+        if not self.is_logged_in:
+            from wenku8.exceptions import NotLoggedInException
+            raise NotLoggedInException("签到需先登录 (api)")
+        resp = await self._post("action=block&do=sign")
+        text = self._decode_xml_text(resp.body).strip()
+        code = self._parse_sign_result(text)
+        if code != 0:
+            raise OperationFailedException(
+                f"签到失败: 返回 {text[:80]}", code=code, source=self.source.value)
+        return 1
+
+    @staticmethod
+    def _parse_sign_result(text: str) -> int:
+        """签到响应解析：优先取 ret 值；纯数字则直接作为返回码；1 亦视为成功。"""
+        import json as _json
+        m = re.search(r"\{.*\}", text, re.S)
+        if m:
+            try:
+                data = _json.loads(m.group(0))
+                if isinstance(data, dict) and "ret" in data:
+                    return int(data["ret"])
+            except Exception:
+                pass
+        if text.isdigit():
+            return 0 if text == "1" else int(text)
+        return 0 if "success" in text.lower() else 1
+
     async def _binary_post(self, cmd: str) -> bytes:
         """POST 并校验 JPEG 二进制。httpcloak 存在对小 JPEG 响应做 UTF-8 解码
         损坏的缺陷（0xFF→U+FFFD），故 magic 校验失败时降级用 requests
@@ -682,6 +766,80 @@ class ApiRelaySource(BaseSource):
                 intro_preview=it.get("IntroPreview", ""),
                 copyright=True, animation=False))
         return int(data.get("page_num", 1)), items
+
+    @classmethod
+    def _parse_shortinfo(cls, xml: str, aid: int) -> NovelInfo:
+        """book&do=info：<data name="..." value|CDATA>。
+
+        BookStatus 此处为数字（0=连载中，1=已完成），与 meta 的文字状态不同。
+        """
+        from lxml import etree
+        try:
+            root = etree.fromstring(xml.encode("utf-8"))
+        except Exception as e:
+            raise PageParseError(f"短信息 XML 解析失败: {e}", page=xml,
+                                 source=Source.api)
+        fields: dict[str, str] = {}
+        for d in root.iter("data"):
+            nm = d.get("name") or ""
+            val = d.get("value")
+            fields[nm] = val if val is not None else (d.text or "").strip()
+        status_raw = (fields.get("BookStatus") or "").strip()
+        if status_raw.isdigit():
+            status = "已完成" if int(status_raw) else "连载中"
+        else:
+            status = status_raw
+        return NovelInfo(
+            aid=aid,
+            title=fields.get("Title", ""),
+            author=fields.get("Author", ""),
+            status=status,
+            last_updated=fields.get("LastUpdate") or None,
+            intro=fields.get("IntroPreview", ""))
+
+    @classmethod
+    def _parse_library_list(cls, xml: str) -> list[LibraryCategory]:
+        """xml&item=sort：<item sort="1">文库名</item>。"""
+        from lxml import etree
+        try:
+            root = etree.fromstring(xml.encode("utf-8"))
+        except Exception as e:
+            raise PageParseError(f"文库列表 XML 解析失败: {e}", page=xml,
+                                 source=Source.api)
+        out: list[LibraryCategory] = []
+        for it in root.iter("item"):
+            sid = (it.get("sort") or "").strip()
+            if not sid.isdigit():
+                continue
+            out.append(LibraryCategory(sort_id=int(sid),
+                                       name=(it.text or "").strip()))
+        return out
+
+    @classmethod
+    def _parse_user_info(cls, xml: str) -> UserInfo:
+        """userinfo：<item name="uname|nickname|uid|score|experience|rank">。"""
+        from lxml import etree
+        try:
+            root = etree.fromstring(xml.encode("utf-8"))
+        except Exception as e:
+            raise PageParseError(f"用户信息 XML 解析失败: {e}", page=xml,
+                                 source=Source.api)
+        fields: dict[str, str] = {}
+        for it in root.iter("item"):
+            nm = it.get("name") or ""
+            if nm:
+                fields[nm] = (it.text or "").strip()
+
+        def _int(key: str) -> int:
+            v = (fields.get(key) or "").strip()
+            return int(v) if v.isdigit() else 0
+
+        return UserInfo(uid=_int("uid"),
+                        username=fields.get("uname", ""),
+                        nickname=fields.get("nickname", ""),
+                        score=_int("score"),
+                        experience=_int("experience"),
+                        rank=fields.get("rank", ""))
 
     @classmethod
     def _parse_bookshelf(cls, xml: str) -> list[Book]:

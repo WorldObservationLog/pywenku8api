@@ -27,13 +27,15 @@ from wenku8.exceptions import (
 )
 from wenku8.limiter import ChainCircuitBreaker, RateLimitConfig
 from wenku8.models import (
-    Book, NovelContent, NovelIndex, NovelInfo, ReviewDetail, ReviewPage, SearchResult,
+    Book, LibraryCategory, NovelContent, NovelIndex, NovelInfo, ReviewDetail, ReviewPage,
+    SearchResult, UserInfo,
 )
 from wenku8.sources.api import ApiRelaySource
 from wenku8.sources.base import BaseSource
 from wenku8.sources.cdn import CdnSource
 from wenku8.sources.web import WebSource
 from wenku8.utils import lang_convent
+from wenku8.validation import validate_review_text
 
 DEFAULT_PRIORITY = (Source.web, Source.api)
 
@@ -541,6 +543,94 @@ class Wenku8Client:
             "fetch_bookshelf_ids", _impl,
             (source.value if isinstance(source, Source) else source,), None, use_cache)
 
+    # ---- 短信息 / 文库分类 / 用户信息 ----
+    async def _chain_call(self, op: Capability, method_name: str, *args,
+                          source: Optional[Source | str] = None):
+        """沿能力链调用同名方法（各源签名一致时使用），第一个成功即返回。"""
+        chain = self._chain_for(op, source)
+        if not chain:
+            raise SourceUnavailableException(str(source), f"无可用来源（{method_name}）")
+        errors: dict[str, str] = {}
+        for src in chain:
+            fn = getattr(src, method_name, None)
+            if fn is None:
+                errors[src.source.value] = "未实现"
+                continue
+            try:
+                return await fn(*args)
+            except Exception as e:  # noqa: BLE001 沿链继续
+                errors[src.source.value] = f"{type(e).__name__}: {e}"
+        raise AllSourcesBlockedException(method_name, errors)
+
+    async def get_novel_shortinfo(self, aid: int,
+                                  source: Optional[Source | str] = None,
+                                  lang: Optional[Lang] = None,
+                                  use_cache: Optional[bool] = None) -> NovelInfo:
+        """条目短信息（api 走 book&do=info；web 退回详情页解析）。"""
+        lang = lang or self.default_lang
+        return await self._cached_call(
+            "fetch_novel_shortinfo",
+            lambda: self._chain_call(Capability.NOVEL_INFO, "fetch_novel_shortinfo",
+                                     aid, lang, source=source),
+            (aid, source.value if isinstance(source, Source) else source, lang.value),
+            None, use_cache, lang=lang)
+
+    async def get_library_list(self, source: Optional[Source | str] = None,
+                               lang: Optional[Lang] = None,
+                               use_cache: Optional[bool] = None) -> list[LibraryCategory]:
+        """文库分类列表（sort_id → 文库名）。"""
+        lang = lang or self.default_lang
+        return await self._cached_call(
+            "fetch_library_list",
+            lambda: self._chain_call(Capability.NOVEL_LIST, "fetch_library_list",
+                                     lang, source=source),
+            (source.value if isinstance(source, Source) else source, lang.value),
+            None, use_cache, lang=lang)
+
+    async def get_novel_list_by_library(self, sort_id: int, page: int = 1,
+                                        source: Optional[Source | str] = None,
+                                        lang: Optional[Lang] = None,
+                                        use_cache: Optional[bool] = None) -> SearchResult:
+        """按文库分类列出小说（sort_id 取自 get_library_list）。"""
+        lang = lang or self.default_lang
+        return await self._cached_call(
+            "fetch_novel_list_by_library",
+            lambda: self._chain_call(Capability.NOVEL_LIST, "fetch_novel_list_by_library",
+                                     sort_id, page, lang, source=source),
+            (sort_id, page, source.value if isinstance(source, Source) else source,
+             lang.value),
+            None, use_cache, lang=lang)
+
+    async def get_user_info(self, source: Optional[Source | str] = None,
+                            lang: Optional[Lang] = None,
+                            use_cache: Optional[bool] = None) -> UserInfo:
+        """当前登录用户信息（api 走 userinfo；web 解析用户面板）。"""
+        lang = lang or self.default_lang
+        return await self._cached_call(
+            "fetch_user_info",
+            lambda: self._chain_call(Capability.LOGIN, "fetch_user_info",
+                                     lang, source=source),
+            (source.value if isinstance(source, Source) else source, lang.value),
+            None, use_cache, lang=lang)
+
+    async def login_email(self, email: str, password: str,
+                          source: Optional[Source | str] = None) -> dict[str, bool]:
+        """邮箱登录（api 走 loginemail；web 登录表单同样接受邮箱）。"""
+        chain = self._chain_for(Capability.LOGIN, source)
+        if not chain:
+            raise SourceUnavailableException(str(source), "无可用登录来源")
+        out: dict[str, bool] = {}
+        for src in chain:
+            fn = getattr(src, "login_email", None)
+            try:
+                if fn is not None:
+                    out[src.source.value] = bool(await fn(email, password))
+                else:
+                    out[src.source.value] = bool(await src.login(email, password))
+            except Exception:  # noqa: BLE001 与 login 一致：失败记为 False
+                out[src.source.value] = False
+        return out
+
     # ---- 写操作（书架增删/推荐/书评发布，需登录）----
     async def bookshelf_add(self, aid: int,
                             source: Optional[Source | str] = None) -> int:
@@ -558,24 +648,36 @@ class Wenku8Client:
         return await self._write_op("vote_novel", aid, source, "推荐")
 
     async def post_review(self, aid: int, title: str, content: str,
-                          source: Optional[Source | str] = None) -> int:
+                          source: Optional[Source | str] = None,
+                          validate: bool = True) -> int:
         """发表书评（需登录）。返回码 1=成功。
 
         注：web 表单仅提交正文，title 在 web 源会被忽略（api 源会一并提交）。
+        validate=True 时先做本地校验（最少 7 字 / 不宜词），见 wenku8.validation。
         """
+        if validate:
+            validate_review_text(content)
         return await self._write_op_fn(
             "post_review", lambda src: src.post_review(aid, title, content),
             source, "发表书评")
 
     async def post_review_reply(self, rid: int, content: str, aid: int = 0,
-                                source: Optional[Source | str] = None) -> int:
+                                source: Optional[Source | str] = None,
+                                validate: bool = True) -> int:
         """回复书评（需登录）。返回码 1=成功。aid 供 web 源定位（可省略）。"""
+        if validate:
+            validate_review_text(content)
         async def _call(src):
             if src.source == Source.web:
                 return await src.post_review_reply(rid, content, aid)
             return await src.post_review_reply(rid, content)
 
         return await self._write_op_fn("post_review_reply", _call, source, "回复书评")
+
+    async def user_sign(self, source: Optional[Source | str] = None) -> int:
+        """每日签到（仅 api 来源提供）。返回 1=成功。"""
+        return await self._write_op_fn(
+            "user_sign", lambda src: src.user_sign(), source, "签到")
 
     async def _write_op(self, method_name: str, aid: int,
                         source: Optional[Source | str],

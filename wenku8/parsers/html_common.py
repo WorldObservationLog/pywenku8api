@@ -19,8 +19,9 @@ from lxml import etree
 
 from wenku8.exceptions import PageParseError
 from wenku8.models import (
-    Book, Chapter, NovelContent, NovelIndex, NovelInfo, PageControl, Review,
-    ReviewDetail, ReviewPage, ReviewReply, SearchItem, SearchResult, Volume,
+    Book, Chapter, LibraryCategory, NovelContent, NovelIndex, NovelInfo, PageControl,
+    Review, ReviewDetail, ReviewPage, ReviewReply, SearchItem, SearchResult, UserInfo,
+    Volume,
 )
 from wenku8.utils import extract_text, separate_chinese_colon
 
@@ -410,3 +411,132 @@ def parse_review_detail(html: str, rid: int = 0, aid: int = 0, *,
     page_control = PageControl.from_str(stats[0].text or "1/1") if stats else PageControl()
     return ReviewDetail(rid=rid, aid=aid, title=title, floors=floors,
                         page_control=page_control)
+
+
+# ---------- 文库分类 / 分类列表 ----------
+def parse_library_list(html: str, *, url: str = "") -> list[LibraryCategory]:
+    """从列表页的“分类阅读”链接提取文库分类（articlelist.php?class=N）。"""
+    parser = _root(html)
+    seen: set[int] = set()
+    out: list[LibraryCategory] = []
+    for a in parser.xpath('//a[contains(@href,"articlelist.php?class=")]'):
+        href = a.get("href") or ""
+        if "charset=" in href:          # 语言切换链接（繁體版等），非分类
+            continue
+        m = re.search(r"class=(\d+)", href)
+        name = (a.text or "").strip()
+        if not m or not name:
+            continue
+        sid = int(m.group(1))
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(LibraryCategory(sort_id=sid, name=name))
+    if not out:
+        raise PageParseError("未解析到文库分类", html, url=url,
+                             xpath='//a[contains(@href,"articlelist.php?class=")]')
+    return out
+
+
+def parse_novel_card_list(html: str, *, url: str = "") -> SearchResult:
+    """分类列表页的书籍卡片：标题/作者/文库/更新/字数/状态/Tags/简介。
+
+    页面把多个卡片放在同一个 <tr> 内，故以卡片容器（div[width:373px]）
+    为单位解析，找不到时回退到按行解析。
+    """
+    parser = _root(html)
+    cards = parser.xpath('//div[contains(@style,"width:373px")]')
+    if not cards:
+        cards = [tr for tr in parser.xpath("//tr")
+                 if tr.xpath('.//a[contains(@href,"/book/")]')]
+    results: list[SearchItem] = []
+    for card in cards:
+        links = card.xpath('.//a[contains(@href,"/book/")]')
+        if not links:
+            continue
+        m = re.search(r"/book/(\d+)\.htm", links[0].get("href") or "")
+        if not m:
+            continue
+        title = ""
+        for a in links:
+            if a.get("title"):
+                title = a.get("title").strip()
+                break
+        if not title:
+            title = (links[0].text or "").strip()
+        text = _text(card)
+        author = press = last_updated = word_count = status = ""
+        if (mm := re.search(r"作者[:：]\s*([^/\n]+)", text)):
+            author = mm.group(1).strip()
+        if (mm := re.search(r"分类[:：]\s*([^/\n]+)", text)):
+            press = mm.group(1).strip()
+        if (mm := re.search(r"更新[:：]\s*([\d-]+)", text)):
+            last_updated = mm.group(1)
+        if (mm := re.search(r"字数[:：]\s*([0-9KkMm.]+)", text)):
+            word_count = mm.group(1)
+        if (mm := re.search(r"(连载中|連載中|已完成)", text)):
+            status = mm.group(1)
+        tags: list[str] = []
+        spans = card.xpath(".//p//span")
+        if spans:
+            tags = [t for t in _text(spans[0]).split() if t]
+        intro_preview = ""
+        if (mm := re.search(r"简介[:：](.*)", text)):
+            intro_preview = mm.group(1).strip()
+        results.append(SearchItem(
+            aid=int(m.group(1)), title=title, author=author, press=press,
+            last_updated=last_updated, word_count=word_count, status=status,
+            tags=tags, intro_preview=intro_preview[:160]))
+    if not results:
+        raise PageParseError("分类列表页未解析到书籍", html, url=url,
+                             xpath='//a[contains(@href,"/book/")]')
+    stats = parser.xpath('//*[@id="pagestats"]')
+    page_control = PageControl.from_str(stats[0].text or "1/1") if stats else PageControl()
+    return SearchResult(results=results, page_control=page_control)
+
+
+# ---------- 用户信息 ----------
+def parse_user_info(html: str, *, url: str = "") -> UserInfo:
+    """用户面板（userdetail.php）的键值表 → UserInfo。"""
+    parser = _root(html)
+
+    def _cell_value(cell) -> str:
+        vals = cell.xpath(".//input/@value")      # 昵称等可能位于 input value
+        if vals and vals[0].strip():
+            return vals[0].strip()
+        return _text(cell).strip()
+
+    fields: dict[str, str] = {}
+    for tr in parser.xpath("//tr"):
+        tds = tr.xpath("./td")
+        if len(tds) < 2:
+            continue
+        key = re.sub(r"\s+", "", _text(tds[0])).rstrip("：:")
+        if not key:
+            continue
+        # 值取“标签后第一个非空单元格”（部分行标签后跟多个 td，末位可能为空）
+        value = ""
+        for td in tds[1:]:
+            v = _cell_value(td)
+            if v:
+                value = v
+                break
+        fields.setdefault(key, value)
+
+    def _int(*keys: str) -> int:
+        for k in keys:
+            digits = re.sub(r"[^\d]", "", fields.get(k, ""))
+            if digits:
+                return int(digits)
+        return 0
+
+    info = UserInfo(uid=_int("用户ID", "UID"),
+                    username=fields.get("用户名", ""),
+                    nickname=fields.get("昵称", ""),
+                    score=_int("现有积分", "积分"),
+                    experience=_int("经验值", "经验"),
+                    rank=fields.get("等级", "") or fields.get("头衔", ""))
+    if not (info.uid or info.username):
+        raise PageParseError("未解析到用户信息（可能未登录）", html, url=url,
+                             xpath='//tr/td')
+    return info
