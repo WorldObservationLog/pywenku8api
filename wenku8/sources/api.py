@@ -31,8 +31,8 @@ from wenku8.exceptions import (
 )
 from wenku8.fetcher.http import HttpResponse
 from wenku8.models import (
-    Book, Chapter, NovelContent, NovelIndex, NovelInfo, PageControl, SearchItem,
-    SearchResult, Volume,
+    Book, Chapter, NovelContent, NovelIndex, NovelInfo, PageControl, Review, ReviewDetail,
+    ReviewPage, ReviewReply, SearchItem, SearchResult, Volume,
 )
 from wenku8.sources.base import BaseSource
 
@@ -72,12 +72,16 @@ def _b64(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
-def _lang_t(lang: Lang) -> int:
-    return 1 if lang == Lang.zh_TW else 0
+def _gbk_urlenc_b64(s: str) -> str:
+    """发帖参数编码：先按 GBK URL 编码，再整体 Base64（relay 要求）。
+
+    与读接口不同，发书评/回复的 title/content 需经此双重编码。
+    """
+    return _b64(quote(s, safe="", encoding="gbk"))
 
 
-def _review_t(lang: Lang) -> str:
-    return "TC" if lang == Lang.zh_TW else "SC"
+# 书评接口的语言参数（读接口用字符串 SC/TC；本项目统一简体请求）
+REVIEW_T_SC = "SC"
 
 
 class ApiRelaySource(BaseSource):
@@ -362,6 +366,74 @@ class ApiRelaySource(BaseSource):
         xml = self._decode_xml_text(resp.body)
         return self._parse_bookshelf(xml)
 
+    async def fetch_bookshelf_ids(self, lang: Lang = Lang.zh_CN) -> list[int]:
+        """轻量书架：仅返回 aid 列表（action=bookcase&do=list）。
+
+        响应形如 `<book aid="123" />`；个别版本可能返回裸 aid 文本，一并兼容。
+        """
+        if not self.is_logged_in:
+            return []
+        resp = await self._post(f"action=bookcase&do=list&t=0")
+        xml = self._decode_xml_text(resp.body)
+        if "<book" in xml:
+            from lxml import etree
+            try:
+                root = etree.fromstring(xml.encode("utf-8"))
+            except Exception as e:
+                raise PageParseError(f"书架 XML 解析失败: {e}", page=xml,
+                                     source=Source.api)
+            out: list[int] = []
+            for b in root.xpath(".//book"):
+                v = b.get("aid")
+                if v and v.isdigit():
+                    out.append(int(v))
+            return out
+        return self._parse_aid_list(xml)
+
+    # ---- 书评 ----
+    async def fetch_reviews(self, aid: int, page: int = 1,
+                            lang: Lang = Lang.zh_CN) -> ReviewPage:
+        """书评列表（action=review&do=list）。"""
+        resp = await self._post(
+            f"action=review&do=list&aid={aid}&page={page}&t={REVIEW_T_SC}")
+        return self._parse_review_list(self._decode_xml_text(resp.body), aid)
+
+    async def fetch_review_detail(self, rid: int, page: int = 1,
+                                  lang: Lang = Lang.zh_CN) -> ReviewDetail:
+        """单条书评及楼层（action=review&do=show）。"""
+        resp = await self._post(
+            f"action=review&do=show&rid={rid}&page={page}&t={REVIEW_T_SC}")
+        return self._parse_review_show(self._decode_xml_text(resp.body), rid)
+
+    async def post_review(self, aid: int, title: str, content: str) -> int:
+        """发表书评（需登录）。title/content 按 GBK URL 编码后 Base64。"""
+        if not self.is_logged_in:
+            from wenku8.exceptions import NotLoggedInException
+            raise NotLoggedInException("发表书评需先登录 (api)")
+        resp = await self._post(
+            f"action=review&do=post&aid={aid}"
+            f"&title={_gbk_urlenc_b64(title)}&content={_gbk_urlenc_b64(content)}")
+        code = self._parse_code(resp)
+        if code != ResultCode.SUCCEEDED:
+            raise OperationFailedException(
+                f"发表书评失败: 返回码 {code} ({_result_text(code)})",
+                code=code, source=self.source.value)
+        return code
+
+    async def post_review_reply(self, rid: int, content: str) -> int:
+        """回复书评（需登录）。content 按 GBK URL 编码后 Base64。"""
+        if not self.is_logged_in:
+            from wenku8.exceptions import NotLoggedInException
+            raise NotLoggedInException("回复书评需先登录 (api)")
+        resp = await self._post(
+            f"action=review&do=reply&rid={rid}&content={_gbk_urlenc_b64(content)}")
+        code = self._parse_code(resp)
+        if code != ResultCode.SUCCEEDED:
+            raise OperationFailedException(
+                f"回复书评失败: 返回码 {code} ({_result_text(code)})",
+                code=code, source=self.source.value)
+        return code
+
     # ---- 写操作（需登录；服务端返回纯数字码，1=成功） ----
     async def bookshelf_add(self, aid: int) -> int:
         """加入书架。返回服务端码：1=成功；5=已在书架（视为成功）。"""
@@ -639,6 +711,61 @@ class ApiRelaySource(BaseSource):
                 add_date=book.get("date")))
         return books
 
+    @classmethod
+    def _parse_review_list(cls, xml: str, aid: int = 0) -> ReviewPage:
+        """review&do=list：<item rid posttime replies replytime> + user/content。"""
+        from lxml import etree
+        try:
+            root = etree.fromstring(xml.encode("utf-8"))
+        except Exception as e:
+            raise PageParseError(f"书评列表 XML 解析失败: {e}", page=xml,
+                                 source=Source.api)
+        reviews: list[Review] = []
+        for item in root.iter("item"):
+            rid = cls._to_int(item.get("rid"))
+            if not rid:
+                continue
+            user = item.find("user")
+            content = item.find("content")
+            reviews.append(Review(
+                rid=rid,
+                aid=aid,
+                post_time=item.get("posttime") or "",
+                replies=cls._to_int(item.get("replies")),
+                reply_time=item.get("replytime") or "",
+                user_uid=cls._to_int(user.get("uid")) if user is not None else 0,
+                user_name=(user.text or "").strip() if user is not None else "",
+                content=(content.text or "").strip() if content is not None else ""))
+        page_node = root.find(".//page")
+        end = cls._to_int(page_node.get("num")) if page_node is not None else 1
+        return ReviewPage(aid=aid, reviews=reviews,
+                          page_control=PageControl(now=1, end=end or 1))
+
+    @classmethod
+    def _parse_review_show(cls, xml: str, rid: int = 0) -> ReviewDetail:
+        """review&do=show：每 <item timestamp> 为一个楼层（首层为书评本体）。"""
+        from lxml import etree
+        try:
+            root = etree.fromstring(xml.encode("utf-8"))
+        except Exception as e:
+            raise PageParseError(f"书评详情 XML 解析失败: {e}", page=xml,
+                                 source=Source.api)
+        floors: list[ReviewReply] = []
+        for idx, item in enumerate(root.iter("item")):
+            user = item.find("user")
+            content = item.find("content")
+            floors.append(ReviewReply(
+                rid=rid,
+                floor=idx,
+                timestamp=item.get("timestamp") or "",
+                user_uid=cls._to_int(user.get("uid")) if user is not None else 0,
+                user_name=(user.text or "").strip() if user is not None else "",
+                content=(content.text or "").strip() if content is not None else ""))
+        page_node = root.find(".//page")
+        end = cls._to_int(page_node.get("num")) if page_node is not None else 1
+        return ReviewDetail(rid=rid, floors=floors,
+                            page_control=PageControl(now=1, end=end or 1))
+
     @staticmethod
     def _to_int(v) -> Optional[int]:
         if v is None:
@@ -655,4 +782,5 @@ class ApiRelaySource(BaseSource):
         # 无整本 TXT 下载（NOVEL_FULL 走 CDN 源），故不声明。
         return {Capability.NOVEL_INFO, Capability.NOVEL_INDEX, Capability.NOVEL_CONTENT,
                 Capability.NOVEL_COVER, Capability.SEARCH,
-                Capability.NOVEL_LIST, Capability.BOOKSHELF, Capability.LOGIN}
+                Capability.NOVEL_LIST, Capability.BOOKSHELF, Capability.REVIEW,
+                Capability.LOGIN}

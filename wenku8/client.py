@@ -23,11 +23,11 @@ from typing import Iterable, Optional
 
 from wenku8.consts import Capability, Lang, SearchMethod, Source
 from wenku8.exceptions import (
-    AllSourcesBlockedException, SourceUnavailableException, Wenku8Error,
+    AllSourcesBlockedException, NotLoggedInException, SourceUnavailableException, Wenku8Error,
 )
 from wenku8.limiter import ChainCircuitBreaker, RateLimitConfig
 from wenku8.models import (
-    Book, NovelContent, NovelIndex, NovelInfo, SearchResult,
+    Book, NovelContent, NovelIndex, NovelInfo, ReviewDetail, ReviewPage, SearchResult,
 )
 from wenku8.sources.api import ApiRelaySource
 from wenku8.sources.base import BaseSource
@@ -480,39 +480,138 @@ class Wenku8Client:
             (source.value if isinstance(source, Source) else source, lang.value),
             None, use_cache, lang=lang)
 
-    # ---- 写操作（书架增删/推荐）----
-    # 写操作目前仅 api(relay) 源实现；web 网页版写操作未实现（表单 CSRF 等），
-    # 故这里明确只用 api 源，若调用方指定其它源则报清晰错误而非空转。
+    # ---- 书评 ----
+    async def get_reviews(self, aid: int, page: int = 1,
+                          source: Optional[Source | str] = None,
+                          lang: Optional[Lang] = None,
+                          use_cache: Optional[bool] = None) -> ReviewPage:
+        """书评列表（api / web 均可，沿优先级链）。"""
+        lang = lang or self.default_lang
+        return await self._cached_call(
+            "fetch_reviews",
+            lambda: self._try_chain(Capability.REVIEW, "fetch_reviews",
+                                    source, aid, page, lang),
+            (aid, page, source.value if isinstance(source, Source) else source, lang.value),
+            None, use_cache, lang=lang)
+
+    async def get_review_detail(self, rid: int, page: int = 1,
+                                source: Optional[Source | str] = None,
+                                lang: Optional[Lang] = None, aid: int = 0,
+                                use_cache: Optional[bool] = None) -> ReviewDetail:
+        """书评详情与楼层（api / web 均可）。"""
+        lang = lang or self.default_lang
+
+        async def _impl():
+            chain = self._chain_for(Capability.REVIEW, source)
+            if not chain:
+                raise SourceUnavailableException(str(source), "无可用书评来源")
+            errors: dict[str, str] = {}
+            for src in chain:
+                try:
+                    if src.source == Source.web:
+                        return await src.fetch_review_detail(rid, page, lang, aid=aid)
+                    return await src.fetch_review_detail(rid, page, lang)
+                except Exception as e:  # noqa: BLE001 沿链继续
+                    errors[src.source.value] = f"{type(e).__name__}: {e}"
+            raise AllSourcesBlockedException("fetch_review_detail", errors)
+
+        return await self._cached_call(
+            "fetch_review_detail", _impl,
+            (rid, page, source.value if isinstance(source, Source) else source, lang.value),
+            None, use_cache, lang=lang)
+
+    async def get_bookshelf_ids(self, source: Optional[Source | str] = None,
+                                use_cache: Optional[bool] = None) -> list[int]:
+        """轻量书架：仅 aid 列表（api 走 bookcase&do=list；web 由书架页提取）。"""
+        async def _impl():
+            chain = self._chain_for(Capability.BOOKSHELF, source)
+            if not chain:
+                raise SourceUnavailableException(str(source), "无可用书架来源")
+            errors: dict[str, str] = {}
+            for src in chain:
+                try:
+                    if hasattr(src, "fetch_bookshelf_ids"):
+                        return await src.fetch_bookshelf_ids()
+                    return [b.aid for b in await src.fetch_bookshelf()]
+                except Exception as e:  # noqa: BLE001
+                    errors[src.source.value] = f"{type(e).__name__}: {e}"
+            raise AllSourcesBlockedException("fetch_bookshelf_ids", errors)
+
+        return await self._cached_call(
+            "fetch_bookshelf_ids", _impl,
+            (source.value if isinstance(source, Source) else source,), None, use_cache)
+
+    # ---- 写操作（书架增删/推荐/书评发布，需登录）----
     async def bookshelf_add(self, aid: int,
                             source: Optional[Source | str] = None) -> int:
-        """加入书架（api 源）。返回服务端码，1=成功。"""
+        """加入书架。返回码 1=成功（web 以书架复核为准）。"""
         return await self._write_op("bookshelf_add", aid, source, "加入书架")
 
     async def bookshelf_del(self, aid: int,
                             source: Optional[Source | str] = None) -> int:
-        """移出书架（api 源）。返回服务端码，1=成功。"""
+        """移出书架。返回码 1=成功；7=不在书架。"""
         return await self._write_op("bookshelf_del", aid, source, "移出书架")
 
     async def vote_novel(self, aid: int,
                          source: Optional[Source | str] = None) -> int:
-        """推荐小说（api 源，App 日限 5 次）。返回服务端码，1=成功。"""
+        """推荐本书（api：App 日限 5 次）。返回码 1=成功。"""
         return await self._write_op("vote_novel", aid, source, "推荐")
+
+    async def post_review(self, aid: int, title: str, content: str,
+                          source: Optional[Source | str] = None) -> int:
+        """发表书评（需登录）。返回码 1=成功。
+
+        注：web 表单仅提交正文，title 在 web 源会被忽略（api 源会一并提交）。
+        """
+        return await self._write_op_fn(
+            "post_review", lambda src: src.post_review(aid, title, content),
+            source, "发表书评")
+
+    async def post_review_reply(self, rid: int, content: str, aid: int = 0,
+                                source: Optional[Source | str] = None) -> int:
+        """回复书评（需登录）。返回码 1=成功。aid 供 web 源定位（可省略）。"""
+        async def _call(src):
+            if src.source == Source.web:
+                return await src.post_review_reply(rid, content, aid)
+            return await src.post_review_reply(rid, content)
+
+        return await self._write_op_fn("post_review_reply", _call, source, "回复书评")
 
     async def _write_op(self, method_name: str, aid: int,
                         source: Optional[Source | str],
                         label: str) -> int:
-        """执行仅 api 源支持的写操作。source 未指定→api；指定非 api→明确报错。"""
+        """写操作（单参数 aid 形式）：指定的源优先，否则沿优先级链尝试。"""
+        return await self._write_op_fn(
+            method_name, lambda src: getattr(src, method_name)(aid), source, label)
+
+    async def _write_op_fn(self, method_name: str, call, source: Optional[Source | str],
+                           label: str) -> int:
+        """写操作通用执行：source 指定则只用该源；否则沿优先级链找到可用实现。
+
+        写操作不可盲目重试（可能已生效），因此第一个可用来源即执行；
+        仅在来源不可用（未实现/未登录/限流）时才切换下一个来源。
+        """
         if source is not None:
             src = self.source(source) if isinstance(source, str) else \
                 self._sources.get(source)
             if src is None or not hasattr(src, method_name):
                 raise SourceUnavailableException(
-                    str(source), f"{label}: 该来源不支持（仅 api 源实现）")
-            return await getattr(src, method_name)(aid)
-        api = self._sources.get(Source.api)
-        if api is None or not hasattr(api, method_name):
-            raise SourceUnavailableException("api", f"{label}: api 源不可用")
-        return await getattr(api, method_name)(aid)
+                    str(source), f"{label}: 该来源不支持")
+            return await call(src)
+        # 按优先级链顺序找第一个实现了该写操作的来源
+        errors: dict[str, str] = {}
+        for s in self.priority:
+            src = self._sources.get(s)
+            if src is None or not hasattr(src, method_name):
+                errors[s.value] = "未实现"
+                continue
+            try:
+                return await call(src)
+            except (SourceUnavailableException, NotLoggedInException) as e:
+                errors[s.value] = f"{type(e).__name__}: {e}"
+                continue
+        raise SourceUnavailableException(
+            str(source), f"{label}: 无可用来源（{errors}）")
 
     async def clear_cache(self) -> None:
         if self._cache is not None:

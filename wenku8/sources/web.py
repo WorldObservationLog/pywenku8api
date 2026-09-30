@@ -8,10 +8,17 @@
 - 搜索：        /modules/article/search.php?searchtype={method}&searchkey={gbk quote}&page={p}
 - 排行：        /modules/article/toplist.php?sort={sort}&page={p}&charset=gbk
 - 书架：        /modules/article/bookcase.php?classid={bid}
+- 书评列表：    /modules/article/reviews.php?aid={aid}&type=all&page={p}
+- 书评详情：    /modules/article/reviewshow.php?rid={rid}&page={p}
+- 加入书架：    GET  /modules/article/addbookcase.php?bid={aid}
+- 移出书架：    GET  /modules/article/bookcase.php?delid={bid}（bid 为书架内 id）
+- 推荐：        GET  /modules/article/uservote.php?id={aid}
+- 登出：        GET  /logout.php
 
 说明：
 - 登录表单在 login.php?do=submit（HTTP 直连实测 200 无质询）；POST 后由
   Set-Cookie 下发 PHPSESSID 与 jieqi* 会话 cookie。
+- 发书评/回复为表单 POST（GBK 表单编码）；写操作均需登录。
 - 深层 module 页在当前出口会被 Cloudflare Managed Challenge 拦截（详见研究文档），
   因此本来源支持 allow_browser_fallback，交由 Fetcher 切换浏览器通道。
 """
@@ -19,12 +26,14 @@ from __future__ import annotations
 
 import re
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from wenku8.consts import Capability, Lang, SearchMethod, Source
-from wenku8.exceptions import LoginErrorException, PageParseError
+from wenku8.exceptions import (
+    LoginErrorException, NotLoggedInException, OperationFailedException, PageParseError,
+)
 from wenku8.models import (
-    Book, NovelContent, NovelIndex, NovelInfo, SearchResult,
+    Book, NovelContent, NovelIndex, NovelInfo, ReviewDetail, ReviewPage, SearchResult,
 )
 from wenku8.parsers import html_common
 from wenku8.sources.base import BaseSource
@@ -67,6 +76,14 @@ class WebSource(BaseSource):
 
     def _bookcase_url(self, classid: int = 0) -> str:
         return f"{self.endpoint}/modules/article/bookcase.php?classid={classid}"
+
+    def _reviews_url(self, aid: int, page: int = 1) -> str:
+        return (f"{self.endpoint}/modules/article/reviews.php"
+                f"?aid={aid}&type=all&page={page}")
+
+    def _reviewshow_url(self, rid: int, page: int = 1) -> str:
+        return (f"{self.endpoint}/modules/article/reviewshow.php"
+                f"?rid={rid}&page={page}")
 
     # ---- 数据获取 ----
     # 语言策略：请求一律简体(GBK)。fetch 层只返回简体原文，简繁转换由
@@ -158,6 +175,115 @@ class WebSource(BaseSource):
         books = html_common.parse_bookshelf(html, url=url)
         return books
 
+    # ---- 书评 ----
+    async def fetch_reviews(self, aid: int, page: int = 1,
+                            lang: Lang = Lang.zh_CN) -> ReviewPage:
+        """书评列表（reviews.php）。"""
+        fetcher = await self._ensure_fetcher()
+        url = self._reviews_url(aid, page)
+        html = await self._page(fetcher, url)
+        return html_common.parse_review_list(html, aid, url=url)
+
+    async def fetch_review_detail(self, rid: int, page: int = 1,
+                                  lang: Lang = Lang.zh_CN,
+                                  aid: int = 0) -> ReviewDetail:
+        """书评详情与楼层（reviewshow.php）。"""
+        fetcher = await self._ensure_fetcher()
+        url = self._reviewshow_url(rid, page)
+        html = await self._page(fetcher, url)
+        return html_common.parse_review_detail(html, rid, aid, url=url)
+
+    # ---- 写操作（需登录）----
+    @staticmethod
+    def _gbk_form(fields: dict[str, str]) -> str:
+        """表单体按站点 GBK 编码（结果为 ASCII 的 %XX 串）。"""
+        return urlencode(fields, encoding="gbk")
+
+    def _require_login(self, action: str) -> None:
+        if not self.is_logged_in:
+            raise NotLoggedInException(f"{action}需先登录 (web)")
+
+    async def post_review(self, aid: int, title: str, content: str) -> int:
+        """发表书评（web 表单仅收正文，title 不参与提交）。成功返回 1。
+
+        web 端 reviews.php 只提交 pcontent 字段；title 参数仅为与 api 源
+        保持同一签名，网页端会忽略。
+        """
+        self._require_login("发表书评")
+        fetcher = await self._ensure_fetcher()
+        referer = self._reviews_url(aid)
+        resp = await fetcher.post(
+            f"{self.endpoint}/modules/article/reviews.php?aid={aid}",
+            data=self._gbk_form({"pcontent": content}),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            referer=referer)
+        if resp.status_code != 200:
+            raise OperationFailedException(
+                f"发表书评失败: HTTP {resp.status_code}", source=self.source.value)
+        return 1
+
+    async def post_review_reply(self, rid: int, content: str, aid: int = 0) -> int:
+        """回复书评（web 表单 pcontent）。成功返回 1。"""
+        self._require_login("回复书评")
+        fetcher = await self._ensure_fetcher()
+        if not aid:                      # 从详情页表单 action 补齐 aid
+            detail_url = self._reviewshow_url(rid)
+            html = await self._page(fetcher, detail_url)
+            m = re.search(r'reviewshow\.php\?rid=' + str(rid) + r'&(?:amp;)?aid=(\d+)', html)
+            if m:
+                aid = int(m.group(1))
+        url = (f"{self.endpoint}/modules/article/reviewshow.php"
+               f"?rid={rid}" + (f"&aid={aid}" if aid else ""))
+        resp = await fetcher.post(
+            url,
+            data=self._gbk_form({"pcontent": content}),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            referer=self._reviewshow_url(rid))
+        if resp.status_code != 200:
+            raise OperationFailedException(
+                f"回复书评失败: HTTP {resp.status_code}", source=self.source.value)
+        return 1
+
+    async def bookshelf_add(self, aid: int) -> int:
+        """加入书架（GET addbookcase.php?bid=）。以书架复核为准，成功返回 1。"""
+        self._require_login("加入书架")
+        fetcher = await self._ensure_fetcher()
+        url = f"{self.endpoint}/modules/article/addbookcase.php?bid={aid}"
+        await fetcher.get(url, referer=self._info_url(aid, Lang.zh_CN))
+        if aid in [b.aid for b in await self.fetch_bookshelf()]:
+            return 1
+        raise OperationFailedException("加入书架失败（书架中未出现该书）",
+                                       source=self.source.value)
+
+    async def bookshelf_del(self, aid: int) -> int:
+        """移出书架（需书架内 bid）。以书架复核为准，成功返回 1。"""
+        self._require_login("移出书架")
+        bid = None
+        for b in await self.fetch_bookshelf():
+            if b.aid == aid:
+                bid = b.bid
+                break
+        if bid is None:
+            return 7                     # 不在书架（与 api 返回码语义一致）
+        fetcher = await self._ensure_fetcher()
+        url = f"{self.endpoint}/modules/article/bookcase.php?delid={bid}"
+        await fetcher.get(url, referer=self._bookcase_url())
+        if aid not in [b.aid for b in await self.fetch_bookshelf()]:
+            return 1
+        raise OperationFailedException("移出书架失败（仍在书架中）",
+                                       source=self.source.value)
+
+    async def vote_novel(self, aid: int) -> int:
+        """推荐本书（GET uservote.php?id=）。成功返回 1。"""
+        self._require_login("推荐")
+        fetcher = await self._ensure_fetcher()
+        url = f"{self.endpoint}/modules/article/uservote.php?id={aid}"
+        resp = await fetcher.get(url, referer=self._info_url(aid, Lang.zh_CN))
+        if resp.status_code != 200:
+            raise OperationFailedException(
+                f"推荐失败: HTTP {resp.status_code}", source=self.source.value)
+        return 1
+
     async def _page(self, fetcher, url: str) -> str:
         """GET 页面并统一解码（站点为 GBK，浏览器渲染层为 UTF-8）。"""
         resp = await fetcher.get(url)
@@ -226,9 +352,11 @@ class WebSource(BaseSource):
         return True
 
     async def logout(self) -> None:
+        """登出：请求 /logout.php 销毁服务端会话，再清本地 cookie。"""
         fetcher = await self._ensure_fetcher()
         try:
-            await fetcher.get(f"{self.endpoint}/login.php?action=logout")
+            await fetcher.get(f"{self.endpoint}/logout.php",
+                              referer=f"{self.endpoint}/")
         except Exception:
             pass
         self._cookies.clear()
@@ -237,4 +365,4 @@ class WebSource(BaseSource):
     def capabilities(self) -> set[Capability]:
         return {Capability.NOVEL_INFO, Capability.NOVEL_INDEX, Capability.NOVEL_CONTENT,
                 Capability.SEARCH, Capability.NOVEL_LIST, Capability.BOOKSHELF,
-                Capability.LOGIN}
+                Capability.REVIEW, Capability.LOGIN}

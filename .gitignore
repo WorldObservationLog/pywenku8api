@@ -182,6 +182,8 @@ libcpp.so.i64
 /docs/
 /scripts/
 /tests/
+dev_*
+_probe_*
 # 浼氳瘽鎶撳寘涓庝笂浼犲尯
 *.har
 .dsh-uploads/
@@ -191,5 +193,5 @@ libcpp.so.i64
 libcpp.so*
 *.so
 
-# 本地私有 appver 实现（绝不入库）
+# 鏈湴绉佹湁 appver 瀹炵幇锛堢粷涓嶅叆搴擄級
 wenku8/local_appver_impl.py

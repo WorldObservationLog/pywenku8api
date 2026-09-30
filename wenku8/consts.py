@@ -76,6 +76,7 @@ class Capability(StrEnum):
     SEARCH = "search"
     NOVEL_LIST = "novel_list"
     BOOKSHELF = "bookshelf"
+    REVIEW = "review"                # 书评（列表 / 详情）
     LOGIN = "login"
     PICTURE = "picture"
 

@@ -7,6 +7,8 @@
 - reader.php?cid=…         → parse_novel_content（章节正文）
 - search.php / toplist.php → parse_search_result（列表，含分页）
 - bookcase.php             → parse_bookshelf
+- reviews.php              → parse_review_list（书评列表）
+- reviewshow.php?rid=…     → parse_review_detail（书评楼层）
 """
 from __future__ import annotations
 
@@ -17,8 +19,8 @@ from lxml import etree
 
 from wenku8.exceptions import PageParseError
 from wenku8.models import (
-    Book, Chapter, NovelContent, NovelIndex, NovelInfo, PageControl, SearchItem,
-    SearchResult, Volume,
+    Book, Chapter, NovelContent, NovelIndex, NovelInfo, PageControl, Review,
+    ReviewDetail, ReviewPage, ReviewReply, SearchItem, SearchResult, Volume,
 )
 from wenku8.utils import extract_text, separate_chinese_colon
 
@@ -300,3 +302,111 @@ def parse_bookshelf(html: str, *, url: str = "") -> list[Book]:
             updated_after_last_reading=updated_after_last_reading,
         ))
     return books
+
+
+# ---------- 书评 ----------
+def _text(el) -> str:
+    """元素纯文本（etree 元素无 text_content，用 XPath string() 取）。"""
+    try:
+        return el.xpath("string(.)")
+    except Exception:
+        return ""
+
+
+def _inner_html(el) -> str:
+    """取元素内部 HTML（保留标签与链接），与 API 侧 content 语义一致。"""
+    parts = []
+    if el.text:
+        parts.append(el.text)
+    for child in el:
+        parts.append(etree.tostring(child, encoding="unicode", method="html"))
+    return "".join(parts).strip()
+
+
+def parse_review_list(html: str, aid: int = 0, *, url: str = "") -> ReviewPage:
+    """reviews.php 书评列表页：每行 → rid/标题/回复数/作者/回复时间。"""
+    parser = _root(html)
+    reviews: list[Review] = []
+    for tr in parser.xpath("//tr"):
+        link = tr.xpath('.//a[contains(@href,"reviewshow.php?rid=")]')
+        if not link:
+            continue
+        m = re.search(r"rid=(\d+)", link[0].get("href") or "")
+        if not m:
+            continue
+        replies = 0
+        reply_time = ""
+        user_uid = 0
+        user_name = ""
+        for td in tr.xpath("./td"):
+            txt = _text(td).strip()
+            mr = re.match(r"^(\d+)/(\d+)$", txt)          # 回复/查看
+            if mr:
+                replies = int(mr.group(1))
+                continue
+            ua = td.xpath('.//a[contains(@href,"userpage.php?uid=")]')
+            if ua:
+                user_name = (ua[0].text or "").strip()
+                mu = re.search(r"uid=(\d+)", ua[0].get("href") or "")
+                user_uid = int(mu.group(1)) if mu else 0
+                continue
+            mt = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", txt)
+            if mt:
+                reply_time = mt.group(1)
+        reviews.append(Review(rid=int(m.group(1)), aid=aid,
+                              title=(link[0].text or "").strip(),
+                              replies=replies, reply_time=reply_time,
+                              user_uid=user_uid, user_name=user_name))
+    if not reviews:
+        raise PageParseError("书评列表页未解析到条目", html, url=url,
+                             xpath='//a[contains(@href,"reviewshow.php")]')
+    stats = parser.xpath('//*[@id="pagestats"]')
+    page_control = PageControl.from_str(stats[0].text or "1/1") if stats else PageControl()
+    return ReviewPage(aid=aid, reviews=reviews, page_control=page_control)
+
+
+def parse_review_detail(html: str, rid: int = 0, aid: int = 0, *,
+                        url: str = "") -> ReviewDetail:
+    """reviewshow.php 书评详情：每个 table.grid 为一个楼层（含正文 HTML）。"""
+    parser = _root(html)
+    title = ""
+    ths = parser.xpath('//table[@class="grid"]//th//strong')
+    if ths:
+        title = re.sub(r"^主题[：:]\s*", "", _text(ths[0]).strip())
+    floors: list[ReviewReply] = []
+    for table in parser.xpath('//table[@class="grid"]'):
+        if table.xpath(".//textarea"):
+            continue                       # 回复表单区，非楼层
+        if not table.xpath("./tr/td"):
+            continue                       # 标题行
+        ua = table.xpath('.//a[contains(@href,"userpage.php?uid=")]')
+        user_uid = 0
+        user_name = ""
+        if ua:
+            mu = re.search(r"uid=(\d+)", ua[0].get("href") or "")
+            user_uid = int(mu.group(1)) if mu else 0
+            user_name = (ua[0].text or "").strip()
+        flat = re.sub(r"\s+", " ", _text(table))
+        mt = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", flat)
+        floor_no = len(floors)          # 与 api 源一致：0-based（0 为书评本体）
+        mf = re.search(r"(\d+)#", flat)
+        if mf:
+            try:
+                floor_no = int(mf.group(1)) - 1   # 页面自 #1 标注，转为 0-based
+            except ValueError:
+                pass
+        content = ""
+        divs = table.xpath('.//div[contains(@style,"width:100%")]')
+        if divs:
+            content = _inner_html(divs[-1])
+        floors.append(ReviewReply(rid=rid, floor=floor_no,
+                                  timestamp=mt.group(1) if mt else "",
+                                  user_uid=user_uid, user_name=user_name,
+                                  content=content))
+    if not floors:
+        raise PageParseError("书评详情页未解析到楼层", html, url=url,
+                             xpath='//table[@class="grid"]')
+    stats = parser.xpath('//*[@id="pagestats"]')
+    page_control = PageControl.from_str(stats[0].text or "1/1") if stats else PageControl()
+    return ReviewDetail(rid=rid, aid=aid, title=title, floors=floors,
+                        page_control=page_control)

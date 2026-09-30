@@ -130,6 +130,56 @@ class SearchResult:
 
 
 @dataclass
+class Review:
+    """书评列表条目（对应 API review&do=list / Web reviews.php 的一行）。"""
+
+    rid: int
+    aid: int = 0
+    title: str = ""                 # 书评标题
+    post_time: str = ""             # YYYYMMDDHHMMSS 或格式化时间
+    replies: int = 0                # 回复数
+    reply_time: str = ""            # 最后回复时间
+    user_uid: int = 0
+    user_name: str = ""
+    content: str = ""               # 摘要/正文（列表页多为标题，详情页为全文）
+
+
+@dataclass
+class ReviewReply:
+    """书评楼层（API review&do=show / Web reviewshow.php）。
+
+    楼层 0 为书评本体，其后为回复。
+    """
+
+    rid: int = 0
+    floor: int = 0
+    timestamp: str = ""
+    user_uid: int = 0
+    user_name: str = ""
+    content: str = ""
+
+
+@dataclass
+class ReviewPage:
+    """一页书评列表。"""
+
+    aid: int = 0
+    reviews: list[Review] = field(default_factory=list)
+    page_control: PageControl = field(default_factory=PageControl)
+
+
+@dataclass
+class ReviewDetail:
+    """单条书评详情（含楼层）。"""
+
+    rid: int = 0
+    aid: int = 0
+    title: str = ""
+    floors: list[ReviewReply] = field(default_factory=list)
+    page_control: PageControl = field(default_factory=PageControl)
+
+
+@dataclass
 class Book:
     """书架条目。"""
 
