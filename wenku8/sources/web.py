@@ -95,6 +95,25 @@ class WebSource(BaseSource):
         info = html_common.parse_novel_info(html, aid, url=url)
         return info
 
+    async def fetch_novel_intro(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
+        """完整简介：网页版无独立接口，取自详情页的简介字段。"""
+        info = await self.fetch_novel_info(aid, lang)
+        return (info.intro or "").strip()
+
+    async def fetch_novel_bookinfo(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelInfo:
+        """列表项信息。网页版无轻量接口，退回完整详情页解析（字段更全）。"""
+        return await self.fetch_novel_info(aid, lang)
+
+    async def fetch_novel_cover(self, aid: int) -> bytes:
+        """封面图：站点封面 CDN（与桌面版页面使用的地址一致）。"""
+        fetcher = await self._ensure_fetcher()
+        url = f"https://img.wenku8.com/image/{aid // 1000}/{aid}/{aid}s.jpg"
+        resp = await fetcher.get(url, no_cache=True)
+        if resp.status_code != 200 or not resp.body:
+            raise PageParseError(f"封面下载失败 status={resp.status_code}",
+                                 url=url, source=self.source.value)
+        return resp.body
+
     async def fetch_novel_index(self, aid: int, lang: Lang = Lang.zh_CN) -> NovelIndex:
         fetcher = await self._ensure_fetcher()
         url = self._reader_url(aid, lang)
@@ -174,6 +193,10 @@ class WebSource(BaseSource):
         html = await self._page(fetcher, url)
         books = html_common.parse_bookshelf(html, url=url)
         return books
+
+    async def fetch_bookshelf_ids(self, lang: Lang = Lang.zh_CN) -> list[int]:
+        """轻量书架：仅 aid 列表（从书架页提取）。"""
+        return [b.aid for b in await self.fetch_bookshelf(0, lang)]
 
     # ---- 书评 ----
     async def fetch_reviews(self, aid: int, page: int = 1,
@@ -365,4 +388,4 @@ class WebSource(BaseSource):
     def capabilities(self) -> set[Capability]:
         return {Capability.NOVEL_INFO, Capability.NOVEL_INDEX, Capability.NOVEL_CONTENT,
                 Capability.SEARCH, Capability.NOVEL_LIST, Capability.BOOKSHELF,
-                Capability.REVIEW, Capability.LOGIN}
+                Capability.REVIEW, Capability.NOVEL_COVER, Capability.LOGIN}
