@@ -54,10 +54,30 @@ asyncio.run(main())
 ## 主要接口
 
 - 阅读：`get_novel_info` / `get_novel_intro` / `get_novel_index` / `get_novel_content` / `get_full_novel_content`
-- 资源：`get_novel_cover` / `get_novel_bookinfo` / `get_picture`
-- 发现：`search_novel`（按名/按作者）/ `get_novel_list`
-- 用户：`login` / `get_bookshelf` / `bookshelf_add` / `bookshelf_del` / `vote_novel`
+- 资源：`get_novel_cover` / `get_novel_bookinfo` / `get_novel_shortinfo` / `get_picture`
+- 发现：`search_novel`（按名/按作者）/ `get_novel_list` / `get_library_list` / `get_novel_list_by_library`
+- 用户：`login` / `login_email` / `get_user_info` / `get_bookshelf` / `get_bookshelf_ids` /
+  `bookshelf_add` / `bookshelf_del` / `vote_novel` / `user_sign`
+- 书评：`get_reviews` / `get_review_detail` / `post_review` / `post_review_reply`
 - 模型见 `wenku8/models.py`，支持简繁（`Lang.zh_CN` / `Lang.zh_TW`）。
+
+### 统一返回值与 extra_fields
+
+不同来源能提供的字段并不相同（例如中继带统计数据、网页详情带站内评级；
+书评列表中继只给正文、网页只给标题）。为保证同一方法在任一来源返回**相同的
+字段集**，默认只填充两个来源都有的字段，来源独有字段留空，需显式启用：
+
+```python
+info = await client.get_novel_info(2580)                      # 仅共有字段
+info = await client.get_novel_info(2580, extra_fields=True)    # 该来源全部字段
+info = await client.get_novel_info(2580, extra_fields=["day_hits", "popularity_level"])
+
+client = Wenku8Client(extra_fields=True)   # 也可设为客户端级默认
+```
+
+可用字段名可查询：`from wenku8 import extra_field_names`。
+字段裁剪发生在返回前，缓存保存的是完整对象，因此切换 `extra_fields`
+不会产生额外请求。
 
 ## 限制
 

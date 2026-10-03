@@ -5,12 +5,16 @@
 - 来源级/全局限速、退避、熔断
 - 反反爬：httpcloak 全栈浏览器指纹（HTTP 层） + zendriver 真实浏览器兜底（CF 质询）
 - 会话登录与 cookie 隔离
+- 返回值统一：默认只返回两来源共有的字段，来源独有字段需显式启用
+  （`extra_fields=True` 或字段名列表；可用 extra_field_names() 查询）
 
 注意：api 来源的 appver 算法不随公开发行版提供（防滥用）。默认 api 不可用，
 需经 Wenku8Client(appver_provider=...) 注入实现（见 wenku8.appver）。
 """
 from wenku8.appver import AppverProvider, default_appver_provider
 from wenku8.client import Wenku8Client
+from wenku8.field_policy import EXTRA_FIELDS, extra_field_names
 
-__all__ = ["Wenku8Client", "AppverProvider", "default_appver_provider"]
+__all__ = ["Wenku8Client", "AppverProvider", "default_appver_provider",
+           "extra_field_names", "EXTRA_FIELDS"]
 __version__ = "0.2.0"
